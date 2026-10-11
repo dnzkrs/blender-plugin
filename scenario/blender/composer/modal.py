@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Modal operator that owns the mouse and keyboard while the pointer is on the composer or the prompt has focus."""
 
+import time
+
 import bpy
 
 from ...core.ui import composer_layout as cl
@@ -68,6 +70,37 @@ def _save_layout():
     save_layout()
 
 
+def _now():
+    """Seconds on a monotonic clock: when the composer handles a press."""
+    return time.monotonic()
+
+
+def _double_click_seconds(context):
+    """Blender's double-click time preference in seconds, else Blender's default."""
+    inputs = getattr(getattr(context, "preferences", None), "inputs", None)
+    ms = getattr(inputs, "mouse_double_click_time", None)
+    if not isinstance(ms, (int, float)) or ms <= 0:
+        ms = cl.DOUBLE_CLICK_MS
+    return ms / 1000.0
+
+
+def _completes_double_click(context, state, layout, event):
+    """Whether this left press is the second press of a double-click on the same composer target.
+
+    Blender turns a double-click into a plain press before calling a modal operator (only key maps see
+    DOUBLE_CLICK), so the composer pairs the presses itself, with Blender's double-click time and its own
+    drag threshold."""
+    x, y = event.mouse_region_x, event.mouse_region_y
+    return state.presses.press(
+        layout.hit(x, y),
+        x,
+        y,
+        _now(),
+        _double_click_seconds(context),
+        cl.DRAG_THRESHOLD * layout.scale,
+    )
+
+
 class SCENARIO_OT_composer_modal(bpy.types.Operator):
     bl_idname = "scenario.composer_modal"
     bl_label = "Scenario composer"
@@ -103,6 +136,7 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
         runtime.state.composer_modal_running = False
         state = runtime.state.composer
         if state is not None:
+            state.presses.reset()
             state.hover = None
             state.dragging = False
             if state.drag_mode is not None:
@@ -119,16 +153,21 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
         dy = event.mouse_region_y - start["mouse"][1]
         layout = _layout(context, state)
         scale = layout.scale
+        beyond = abs(dx) >= cl.DRAG_THRESHOLD * scale or abs(dy) >= cl.DRAG_THRESHOLD * scale
         if state.drag_mode == "pending":
-            if abs(dx) < cl.DRAG_THRESHOLD * scale and abs(dy) < cl.DRAG_THRESHOLD * scale:
+            if not beyond:
                 return
             state.drag_mode = "move"
             _cursor(context, "SCROLL_XY")
+        if beyond:
+            # the pointer left the press: the next press starts a new click. The grip follows the pointer at
+            # once, so jitter within the threshold resizes slightly but still lets a double-click pair.
+            state.presses.reset()
         if start.get("origin") is None:
-            # Start from the placement as drawn. A saved offset or width past a toolbar or sidebar
-            # edge (parked there before the sidebar opened) is clamped first; otherwise the pointer
-            # would have to cover that hidden excess before the composer follows it. The pressed
-            # offset and width stay in drag_start, so Escape (cancel_drag) still restores them.
+            # Start from the placement as drawn. A saved offset or width past an edge (parked against
+            # the viewport edge or a sidebar that has since closed or opened) is clamped first; otherwise
+            # the pointer would have to cover that hidden excess before the composer follows it. The
+            # pressed offset and width stay in drag_start, so Escape (cancel_drag) still restores them.
             start["origin"] = (layout.offset(), layout.pill_rect.w)
             state.offset = start["origin"][0]
         state.moved = True
@@ -187,6 +226,7 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
                 self._drag_release(context, state, scene)
                 return {"RUNNING_MODAL"}
             if event.type == "ESC" and event.value == "PRESS":
+                state.presses.reset()  # the press is cancelled: the next one starts a new click
                 state.cancel_drag()
                 _cursor(context, None)
                 _redraw(context)
@@ -219,7 +259,14 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
                 _redraw(context)
                 return {"RUNNING_MODAL"}
             return {"PASS_THROUGH"} if not state.focused else {"RUNNING_MODAL"}
-        if event.type == "LEFTMOUSE" and event.value == "DOUBLE_CLICK":
+        value = event.value
+        if event.type != "LEFTMOUSE":
+            if value == "PRESS":
+                state.presses.reset()  # another key or button between two clicks: no double-click
+        elif value == "PRESS" and _completes_double_click(context, state, layout, event):
+            value = "DOUBLE_CLICK"
+        if event.type == "LEFTMOUSE" and value == "DOUBLE_CLICK":
+            state.presses.reset()
             hit = layout.hit(event.mouse_region_x, event.mouse_region_y)
             if hit == ("prompt",) and state.expanded:
                 state.sync_from_lane(scene)
@@ -235,8 +282,9 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
                 state.reset_layout()
                 _save_layout()
                 _redraw(context)
+            # elsewhere the second press does nothing more: a double-click on Generate submits once
             return {"RUNNING_MODAL"}
-        if event.type == "LEFTMOUSE" and event.value == "PRESS":
+        if event.type == "LEFTMOUSE" and value == "PRESS":
             hit = layout.hit(event.mouse_region_x, event.mouse_region_y)
             if hit is None:
                 try:
