@@ -386,7 +386,7 @@ class JobStoreTests(unittest.TestCase):
                 return httpx.Response(
                     200,
                     json={
-                        "job": {"jobId": "fixture-remote", "jobType": "custom", "status": status}
+                        "job": {"jobId": "fixture-remote", "jobType": "inference", "status": status}
                     },
                 )
 
