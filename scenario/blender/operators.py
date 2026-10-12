@@ -9,9 +9,10 @@ import bpy
 from bpy.props import EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from ..core.api.errors import ScenarioError
+from ..core.scene import panorama_contract
 from ..core.scene.splats import SplatError
 from ..core.ui.costs import format_cu
-from . import apply_image, generation, params_ui, props, runtime
+from . import apply_image, generation, panorama_lane, params_ui, props, runtime
 
 
 class SCENARIO_OT_test_connection(bpy.types.Operator):
@@ -792,6 +793,13 @@ class SCENARIO_OT_reload_generation(bpy.types.Operator):
             scene.scenario.edit3d_task = task
         else:
             scene.scenario.lane = lane
+            contract = panorama_contract.contract_for(rec.model_id) if lane == "panorama" else None
+            if contract is not None:
+                # The mode lists the model; a matching 2:1 size preset is restored too.
+                generation.select_panorama_mode(context, contract.mode)
+                size = tuple(rec.body.get(name) for name in contract.size_params)
+                if contract.sizes and size in contract.sizes:
+                    scene.scenario.panorama_size = "{}x{}".format(*size)
             if lane == "3d":
                 record = runtime.state.records.get(rec.model_id)
                 mode = next(
@@ -858,8 +866,27 @@ class SCENARIO_OT_reload_generation(bpy.types.Operator):
         inputs = [
             p for p in (rec.meta.get("inputs") or []) if isinstance(p, str) and os.path.exists(p)
         ]
+        # The saved local files name no input, so none may fill a panorama
+        # input: its recorded asset is reattached first, and the files go only
+        # to ordinary inputs below.
+        panorama_inputs = [
+            spec.name
+            for spec in schema.specs
+            if lane == "panorama"
+            and spec.is_file
+            and panorama_lane.is_panorama_input(lane_state, spec.name)
+        ]
+        for name in panorama_inputs:
+            value = rec.body.get(name)
+            for asset_id in value if isinstance(value, list) else [value]:
+                if (
+                    isinstance(asset_id, str)
+                    and asset_id.startswith("asset_")
+                    and not panorama_lane.restore_saved(scene, name, asset_id)
+                ):
+                    _add_asset_reference(lane_state, name, asset_id)
         for spec in schema.specs:
-            if not spec.is_file:
+            if not spec.is_file or spec.name in panorama_inputs:
                 continue
             if lane == "edit3d" and (spec.kind or "").lower() == "3d":
                 continue  # the mesh comes from the current scene selection, not a stale asset from the old job
@@ -884,13 +911,7 @@ class SCENARIO_OT_reload_generation(bpy.types.Operator):
             else:
                 for asset_id in ids:
                     if isinstance(asset_id, str) and asset_id.startswith("asset_"):
-                        ref = lane_state.references.add()
-                        ref.param_name, ref.source, ref.asset_id, ref.label = (
-                            spec.name,
-                            "ASSET",
-                            asset_id,
-                            asset_id,
-                        )
+                        _add_asset_reference(lane_state, spec.name, asset_id)
         props.mark_estimate_dirty(lane_state)
         self.report(
             {"INFO"},
@@ -905,6 +926,12 @@ _EXTS = {
     "audio": (".mp3", ".wav", ".ogg", ".m4a"),
     "3d": (".glb", ".gltf", ".fbx", ".obj"),
 }
+
+
+def _add_asset_reference(lane_state, param_name, asset_id):
+    """Restore one recorded asset ID as a bare reference; its form rechecks it."""
+    ref = lane_state.references.add()
+    ref.param_name, ref.source, ref.asset_id, ref.label = (param_name, "ASSET", asset_id, asset_id)
 
 
 class SCENARIO_OT_quick_settings(bpy.types.Operator):
@@ -935,6 +962,8 @@ class SCENARIO_OT_quick_settings(bpy.types.Operator):
             render_lanes.draw_render_image_lane(layout, context)
         elif lane == "render_video":
             render_lanes.draw_render_video_lane(layout, context)
+        elif lane == "panorama":
+            panels.draw_panorama_lane(layout, context)
         else:
             panels.draw_generate_lane(layout, context, lane)
 

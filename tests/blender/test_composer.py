@@ -86,6 +86,112 @@ class ComposerStateTests(unittest.TestCase):
             scene.scenario.lane = lane
             self.assertEqual(state.lane_for(scene), "image")
 
+    def test_environment_is_a_composer_lane_in_its_generate_mode_only(self):
+        scene = bpy.context.scene
+        state = self.state_mod.ComposerState()
+        scene.scenario.lane_state("image").prompt = "an image prompt"
+        scene.scenario.lane = "panorama"
+        scene.scenario.panorama_mode = "HDRI"
+        # HDRI starts from a saved panorama, so the composer keeps driving Image.
+        self.assertEqual(state.lane_for(scene), "image")
+        self.assertEqual(state.sync_from_lane(scene).prompt, "an image prompt")
+        scene.scenario.lane_state("panorama").prompt = "a misty valley"
+        # A composer tab click: commit, choose the lane, then show its prompt.
+        state.commit_to_lane(scene)
+        self.state_mod.choose_lane(scene, "panorama")
+        lane_state = state.sync_from_lane(scene)
+        self.assertEqual(scene.scenario.panorama_mode, "GENERATE")
+        self.assertEqual(state.lane_for(scene), "panorama")
+        self.assertEqual(
+            (lane_state.prompt, state.field.text), ("a misty valley", "a misty valley")
+        )
+        state.field.set_text("a misty valley at dawn")
+        state.commit_to_lane(scene)
+        self.state_mod.choose_lane(scene, "image")
+        state.sync_from_lane(scene)
+        self.assertEqual(scene.scenario.lane_state("panorama").prompt, "a misty valley at dawn")
+        self.assertEqual(state.field.text, "an image prompt")
+        # The sidebar's own Environment modes are left alone by other tabs.
+        scene.scenario.panorama_mode = "UPSCALE"
+        self.state_mod.choose_lane(scene, "video")
+        self.assertEqual(scene.scenario.panorama_mode, "UPSCALE")
+
+    def test_settings_dialog_gets_focused_text_before_a_mode_change_retargets_it(self):
+        modal = submodule("blender.composer.modal")
+        scene = bpy.context.scene
+        scenario = scene.scenario
+        scenario.lane_state("image").prompt = "an image prompt"
+        scenario.lane = "panorama"
+        scenario.panorama_mode = "GENERATE"
+        scenario.lane_state("panorama").prompt = "a misty valley"
+        state = self.state_mod.ComposerState()
+        self.addCleanup(setattr, self.runtime.state, "composer", self.runtime.state.composer)
+        self.runtime.state.composer = state
+        state.sync_from_lane(scene)
+        state.focused = True
+        state.field.set_text("a misty valley at dusk")
+        opened = []
+
+        def settings(_how, lane):
+            # The dialog shows the committed text; choosing HDRI there moves the composer to Image.
+            opened.append((lane, scenario.lane_state("panorama").prompt))
+            scenario.panorama_mode = "HDRI"
+            return {"RUNNING_MODAL"}
+
+        ops = SimpleNamespace(
+            scenario=SimpleNamespace(quick_settings=settings, generate=MagicMock())
+        )
+        context = SimpleNamespace(scene=scene, region=MagicMock())
+        operator = SimpleNamespace(report=MagicMock())
+        press = SimpleNamespace(type="LEFTMOUSE", value="PRESS", mouse_region_x=9, mouse_region_y=9)
+        enter = SimpleNamespace(
+            type="RET", value="PRESS", ctrl=False, oskey=False, shift=False, mouse_region_x=9
+        )
+        with (
+            patch.object(modal, "_layout") as layout,
+            patch.object(modal, "_geometry") as geometry,
+            patch.object(modal, "bpy", SimpleNamespace(ops=ops)),
+        ):
+            # Hit tests go through the composer and strip geometry; share the card layout with it.
+            geometry.return_value.layout = layout.return_value
+            geometry.return_value.hit = layout.return_value.hit
+            geometry.return_value.job = None
+            layout.return_value.hit.return_value = ("settings",)
+            result = modal.SCENARIO_OT_composer_modal.modal(operator, context, press)
+            self.assertEqual(result, {"RUNNING_MODAL"})
+            # Enter after the dialog leaves no focused text to land in the Image prompt.
+            layout.return_value.hit.return_value = None
+            modal.SCENARIO_OT_composer_modal.modal(operator, context, enter)
+        self.assertEqual(opened, [("panorama", "a misty valley at dusk")])
+        self.assertFalse(state.focused)
+        self.assertEqual(state.lane_for(scene), "image")
+        self.assertEqual(scenario.lane_state("image").prompt, "an image prompt")
+        self.assertEqual(scenario.lane_state("panorama").prompt, "a misty valley at dusk")
+        ops.scenario.generate.assert_not_called()
+        operator.report.assert_not_called()
+        # A form changed under the focused text keeps both texts and opens nothing.
+        scenario.panorama_mode = "GENERATE"
+        state.sync_from_lane(scene)
+        state.focused = True
+        state.field.set_text("pending composer")
+        scenario.lane_state("panorama").prompt = "new sidebar value"
+        with (
+            patch.object(modal, "_layout") as layout,
+            patch.object(modal, "_geometry") as geometry,
+            patch.object(modal, "bpy", SimpleNamespace(ops=ops)),
+        ):
+            # Hit tests go through the composer and strip geometry; share the card layout with it.
+            geometry.return_value.layout = layout.return_value
+            geometry.return_value.hit = layout.return_value.hit
+            geometry.return_value.job = None
+            layout.return_value.hit.return_value = ("settings",)
+            result = modal.SCENARIO_OT_composer_modal.modal(operator, context, press)
+        self.assertEqual(result, {"RUNNING_MODAL"})
+        self.assertEqual(len(opened), 1)
+        self.assertTrue(state.focused)
+        self.assertEqual(scenario.lane_state("panorama").prompt, "new sidebar value")
+        operator.report.assert_called_once()
+
     def test_selection_survives_commit_and_sync_resets_it(self):
         scene = bpy.context.scene
         scene.scenario.lane = "image"
@@ -587,9 +693,10 @@ class ComposerSideRegionTests(unittest.TestCase):
         drawn = self._draw(closed, state, texts)
         card = layout.card_rect
         self.assertIn((card.x, card.y, card.w, card.h), drawn)
-        # glyphs 0.65 em wide at 48 px: the long labels give way to their short ones, none is clipped
+        # glyphs 0.65 em wide at 48 px: on the minimum card the long labels give way to their short ones,
+        # none is clipped
         shown = [label for label in texts if label in self._lane_labels()]
-        self.assertEqual(shown, ["Image", "Video", "3D", "Mat", "R-Img", "R-Vid"])
+        self.assertEqual(shown, ["Img", "Vid", "3D", "Mat", "R-Img", "R-Vid", "Env"])
         # the sidebar opens again: the pill once more, with the stored choice untouched
         self.assertFalse(self.modal._layout(opened, state).expanded)
         self.assertEqual((state.expanded, state.width), (True, 1680))

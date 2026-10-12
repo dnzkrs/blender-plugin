@@ -301,6 +301,18 @@ expected workflow state has no pending upload form. Upload fields are recorded
 only when present, so an unmarked form keeps the same signature and snapshot as
 a predecessor without them.
 
+A saved blend stores each scene's lane tab as its item index. The probe sets the
+seeded scene's tab to Blockout, the last tab before Environment was appended, and
+the scene snapshot requires that tab after update and offline reopen. When the
+predecessor has the Environment lane, a second saved scene also seeds that tab,
+its HDRI mode, a 3072 x 1536 size, its prompt and model choice, a saved
+panorama reference with scope, asset, kind and projection markers, and a checked
+upload's reference with its measured 2:1 size marker. Both reports
+then include `environment_lane_preserved: true`, which the runner requires
+exactly when `expected-state.json` contains that Environment state. Older
+predecessors report false: they show only that an older saved tab survives the
+appended item.
+
 The probe rejects Python socket connections while seeding/checking/upgrading.
 Blender's native updater uses its configured loopback repository; this is not an
 OS sandbox for arbitrary package code or subprocesses. Use only trusted archives.

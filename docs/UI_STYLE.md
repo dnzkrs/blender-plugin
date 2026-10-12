@@ -46,7 +46,7 @@ interaction, paid generation, or integrated release acceptance under #68.
 
 ## Tabs and segmented choices
 
-A row of mutually exclusive choices (lane tabs, picker modality tabs and category chips, Edit 3D tasks) is a **continuous segmented control**: cells touch (no gaps), each takes an equal share of the full width, and the icon sits next to its label with the pair centred in the cell.
+A row of mutually exclusive choices (lane tabs, picker modality tabs and category chips, Edit 3D tasks, Environment modes) is a **continuous segmented control**: cells touch (no gaps), each takes an equal share of the full width, and the icon sits next to its label with the pair centred in the cell.
 
 - Use `panels.equal_segments(row, struct, prop, values)` (or `panels.draw_enum_tabs(layout, struct, prop, rows)` for multiple rows). It draws each value with `prop_enum` inside an `align=True` row (Blender merges the borders) and forces equal widths with a chain of even `split()`s.
 - Never use `prop(..., expand=True)` for these (it pins the icon to the left edge) or `grid_flow` (it leaves gaps).
@@ -357,11 +357,17 @@ nothing.
   composer assumes it reopens at Blender's default width of 220 px times the UI
   scale; a sidebar widened before it was hidden can still leave less room than
   that, and the pill then stands in as usual.
+- The seven lane tabs share their row in proportion to their full labels' length
+  plus a fixed allowance, so Render Video gets more room than 3D. Equal cells
+  would clip R-Img on the minimum card and shorten Render Video on the default
+  one; with these widths the default card shows every full label and the minimum
+  card every short label whole.
 - A lane tab shows its full label when it fits the tab, otherwise a short one:
-  **Img**, **Vid**, **3D**, **Mat**, **R-Img**, **R-Vid**. Each tab decides from
-  the measured text width, so Image and Video can keep their full labels beside
-  R-Img. Only a short label that still does not fit is clipped with an ellipsis,
-  as a last resort and never below its first character, so a tab is never blank.
+  **Img**, **Vid**, **3D**, **Mat**, **R-Img**, **R-Vid**, **Env**. Each tab
+  decides from the measured text width, so Image and Video can keep their full
+  labels beside R-Img. Only a short label that still does not fit is clipped with
+  an ellipsis, as a last resort and never below its first character, so a tab is
+  never blank.
 - A saved or dragged offset keeps the whole pill or card inside the viewport,
   between any toolbar and sidebar: it stops at a bare viewport edge as it does
   at a side-region edge, so Generate and the minus button stay in view. The
@@ -785,6 +791,75 @@ old handle's refusal, confirmation, the busy-slot refusal reason and cancel.
 Physical desktop evidence of the dropdowns, the dialog fit at other sizes and
 DPI, the post-import status lines, and viewport navigation after a
 1,000,000-point import is pending.
+
+## Environment lane
+
+**Environment** is appended to the lane tabs, in the Audio / Materials row; a
+saved blend stores a tab as its item index, so new tabs are only appended. Its
+form starts with a segmented **Generate / From image / HDRI / Upscale** control
+and a wrapped line describing the mode, then follows the usual order: Model,
+Prompt (when the model has one), References, Settings, then Generate. The model
+picker and dropdown list only the mode's verified panorama contract models; a
+model left from another mode is not priced. GPT's size is a **Panorama size**
+dropdown of its 2:1 presets instead of free width and height. Contract-forced
+settings are drawn greyed, with **Greyed settings are fixed by the Environment
+lane** below them. A result line never calls an LDR result HDR: **Result: LDR
+2:1 panorama, saved until you set it as World** or **Result: HDR OpenEXR
+environment, saved until you set it as World**.
+
+An input that takes a 360 panorama offers **Saved panorama** in its header
+instead of **Saved uploads**, and only **Upload** as a source, with **A saved
+360 result or a 2:1 PNG/JPEG** below. Its references never offer **Use saved
+upload**; a capture left on such an input shows a remedy instead of an upload
+button. **Use saved panorama** lists the selected connection's downloaded LDR
+360 results in a dialog; confirming attaches one and invalidates the price.
+Still inputs (GPT references, HY World's image, upscale style images) keep the
+ordinary image sources.
+
+Saved-job controls label a server-declared 360 result **360 panorama (LDR)**,
+**360 HDR environment (OpenEXR)** or **360 panorama and HDR environment**, keep
+**Set panorama as World (N)**, and offer **Make HDRI (N)** on settled jobs with a
+downloaded LDR panorama. Make HDRI only opens the HDRI form with that reference;
+it never prices, generates or changes a World. A material map, such as a 3D
+package's PBR maps or a texture set, is never a World candidate, a Make HDRI
+source or a **Use saved panorama** choice. The floating composer shows an
+**Environment** tab (**Env** when its full label does not fit) that drives the
+Generate mode; choosing it selects that mode, and while the sidebar shows
+another Environment mode the composer drives Image. As on every tab, its
+**Settings** chip commits focused text to the original form before the dialog
+opens, so a mode change there cannot retarget that text; a form that changed
+under the text refuses to open and keeps both texts. Make HDRI and Reload
+relist the target mode's models even when the scene already shows that mode,
+because the list is shared by scenes. Reload attaches a panorama input's
+recorded asset as a saved panorama only while the selected connection still
+holds it as a downloaded LDR 360 result; any other asset ID is restored bare and
+refused until a panorama is chosen again. A saved job's local files do not name
+their input, so Reload never puts one on a panorama input; they fill only still
+inputs such as Upscale's style images. Mode, size and model changes happen in
+property callbacks or operators; drawing never writes. Contract values and the
+recorded model choice that a catalog load fills in are stored without RNA
+updates, like seeded schema defaults, so they keep captured origins current.
+
+Installed tests on macOS arm64 Blender 5.1.2 cover the appended tab values
+through a saved and reopened blend, mode model lists and price invalidation,
+contract values, read-only drawing of every mode, picker restriction, Quick
+settings, Reload, the composer tab, the panorama upload preflight, material
+maps kept out of every Environment and World control, and a fake service quote,
+submission, saved result, restart, Make HDRI and World approval in a newly
+selected scene.
+
+A physical desktop pass on macOS arm64 Blender 5.1.2 at UI scales 1 and 2 used
+the exact packaged ZIP of this lane before it was rebased onto the World
+candidate fix (#394), with free price quotes only. The tab, modes and mode lines
+in the sidebar and Studio, the mode-restricted dropdown and picker, the Flux,
+GPT and HDRI settings and result lines, the upscale factor cap message, World
+application of saved PNG, OpenEXR and JPEG panoramas, Restore previous World,
+reapplying after a Blender undo, Esc and viewport keys after each dialog, and
+the controls at scale 2 behaved as described here. That pass also found material
+maps offered as World panoramas; the rebased lane uses #394's World candidates,
+which an installed test checks, but the fix was not rechecked physically. Nor
+were the composer's label-sized tab row, a local file through **Upload
+reference** or From image beyond its quote. No screenshot is committed.
 
 ## Saved panorama approval and restoration
 
