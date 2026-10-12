@@ -572,6 +572,9 @@ review once; if the command cannot even be queued, the review returns to READY
 because nothing was sent. `collections` and `take_collections` read one page
 of collections without thumbnails or owner IDs; like `poll`, a failed read
 reports only text written for these surfaces, never the worker's own error text.
+A finished page nobody takes within the 10-minute review lifetime, for example
+after a local MCP request stopped waiting, is discarded unread by `poll`, so it
+cannot hold a session admission slot; taking it later asks for a new read.
 
 A review moves from PREPARING to READY, UNCHANGED (nothing to change) or
 REJECTED, then from READY to APPLYING and FINISHED or NOT_SENT; it can also be
@@ -585,8 +588,10 @@ Loading a file, a credential or project change, or a reset retires the session
 as before: its reviews are discarded, queued work is cancelled unsent, a write
 in flight finishes but the guard refuses later ones, and the late outcome cannot
 be delivered to the replacement session. Inspect the assets in the Library of
-the right connection; nothing is resent automatically. No native or MCP control
-uses this owner yet.
+the right connection; nothing is resent automatically. The local
+[MCP organization tools](MCP.md#asset-organization) use this owner and accept a
+review only with the `job_context_id` issued alongside it, so a replaced session
+rejects an old context. No native Library control uses it yet.
 
 ## Upload references
 
