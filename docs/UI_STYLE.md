@@ -311,10 +311,12 @@ once Scenario reports success: Generations lists it, including after **Inspect
 saved jobs**, and it never draws a Jobs row or a download line. The projection
 decides from the saved request (its operation and model), never from drawn
 text. While a known remote job is polled, the latest validated Scenario status
-replaces `submitted`: `waiting`, `queued`, `starting`, `generating` or
-`finishing`. Draw a native progress bar with its whole percentage only when
-Scenario reports a measured fraction above zero; never draw a percentage for
-zero, unknown or queued states, and never show an estimated time. With online
+replaces `submitted`: `queued` (Scenario's `pending` and `queued`), `starting`
+(`warming-up`), `generating` (`in-progress`) or `finalizing`. The composer's
+job strip uses the same words, capitalized. Draw a native progress bar with its
+whole percentage only while generating or finalizing and only from 1%; never
+draw a percentage for zero, a fraction below 1%, unknown or queued states, and
+never show an estimated time. With online
 access disabled, a `submitted` or `canceling` row
 adds `Status paused while online access is disabled` and a `finished on
 Scenario` row adds `Download paused while online access is disabled`, whether or
@@ -646,11 +648,11 @@ shows its own job or no tray.
   bottom edge in the job's tone; it keeps its own click.
 - One line reads title · status · price · +N more, cut with an ellipsis. The
   status uses the [strip wording](../scenario/core/ui/job_strip.py), whose remote
-  words are the Jobs rows' words capitalized (`Waiting`, `Queued`, `Starting`,
-  `Generating`, `Finishing`), with a tone dot that is never the only signal.
+  words are the Jobs rows' words capitalized (`Queued`, `Starting`,
+  `Generating`, `Finalizing`), with a tone dot that is never the only signal.
   While a job is active, a thin bar under the line fills to the reported
   percentage from 1% to 99%, else it stays a dim full track. Unlike the Jobs
-  bar, it shows no percentage while finishing. Without online access, states
+  bar, it shows no percentage while finalizing. Without online access, states
   that wait on Scenario add `(offline)`;
   a remote reading that polling is not keeping current adds `(last known)`.
   A paused delivery's own message replaces the status in the review tone, and
@@ -844,6 +846,89 @@ audio, the waveform's Cancel, Retry and close on the desktop, clicking **Play
 video** or **Play in Blender** at UI scale 2.0, Studio at UI scale 2.0, viewport
 interaction, other platforms and human listening are not yet recorded; they
 remain #189 and #68 acceptance.
+
+## Saved result previews
+
+Shared saved jobs whose results are downloaded show preview tiles above their
+saved-job controls, in Jobs, Generations and the Studio pages that reuse them:
+four at a time, primary results first (video, audio, embedded model, base
+color or untagged image), then other maps. Each tile is the preview icon or,
+until it is ready, the result kind's built-in icon at the same size, with a
+caption that starts with the number of its saved-job controls: **(1) Video**,
+**(3) Albedo**. Blender keeps the start of a caption that does not fit, so a
+narrow sidebar clips the role before the number. Below the tiles, one
+information line per distinct status names the waiting tiles as the controls
+do, such as **Video (1)**: preparing, waiting for Scenario, or `Preview paused
+while online access is disabled`. When the scheduler refuses a request, for
+example at its limit of pending previews, the tiles it left without a preview
+show its reason on that line until the request is made again, while ready
+tiles and the page stay. A missing, failed or unreadable preview gets
+an `ERROR` line with its reason and an explicit **Retry preview (N)** button;
+nothing retries after the polling window without that click. Previews are
+read-only and open no confirmation; Retry's tooltip says nothing is generated,
+applied, spent or changed in the scene. Shared image rows no longer load a
+draw-time thumbnail.
+
+Blender panels cannot scroll sideways, so a job with more than four previewable
+results gets a pager instead of a fifth tile: a **‹** button before the tiles,
+a **›** button after them, each one interface unit wide and as tall as the
+icons, and a range line such as `3-6 of 6` under the row. The range uses a
+hyphen-minus. A page steps by four and the last page ends at the last result,
+so it is always full: six results show 1-4, then 3-6. An arrow at its end stays
+in place, drawn disabled, so the tiles never shift. The arrows run an operator
+that changes the job's page offset, transient state of the preview controller
+that is never saved with the file and never written while drawing; a changed
+set of previewable results, a connection, project or file change, or the job
+leaving the first rows each panel draws starts it on its first page again. Only
+the drawn page's previews are requested; paging requests the next page at once
+and shows its icons as the timer builds them. Jobs, Generations and the Studio
+Jobs and Results pages draw the same pager, because they draw the same tiles.
+
+Icon size follows the drawn region's width, or in Studio the width it requests
+for its popup, divided by `preferences.system.ui_scale` (1 when background
+Blender reports 0). Status lines wrap like the waveform box's, by the width
+Blender's interface font measures less the sidebar's panel, job box and icon
+space, and a caption such as **Model (2)** stays whole on one line. Drawing
+reads only the controller's precomputed tiles and pages: no file, store or
+session access, decode, request or property write. Requests, image decoding and icons happen in
+the controller's timer, outside drawing.
+
+Installed exact-ZIP tests on Blender 5.0.1, 5.1.2 and 5.2.1 macOS arm64 draw
+tiles through recording layouts with file and store reads refused, and through
+the real Jobs panel. They check that each caption starts with its number and
+that the number with an ellipsis fits the tile's icon width in Blender's UI
+font. On Blender 5.1.2 they also measure the status lines in a 561 px sidebar
+at an interface scale of 2, in a sized popup and in Studio's first draw before
+its popup is sized, where the icons also size from the requested width. Pager
+tests on Blender 5.1.2 page six maps forward and back, clamp at both ends,
+refuse a stale connection or job, start again on the first page after the
+results change or the connection retires, find the same arrows and range line
+in Jobs, Generations and Studio, and draw a paged row with file and store reads
+refused and no change to tiles, pages, offsets or requests. The pager has no
+desktop evidence yet: its arrow width and height and its use at UI scales 1.0
+and 2.0 need a physical check.
+
+Two private physical desktop passes on Blender 5.1.2 macOS arm64 at UI scale
+1.0, with system mouse and wheel events and ZIPs built before the measured
+status wrapping, showed tiles going from their placeholder and status line to
+ready in Jobs, and ready tiles in Generations and on the Studio Jobs and Results
+pages. Wheel scrolling the sidebar and the Studio Jobs page kept the tiles in
+place, and the next clicks hit the intended controls. The second pass read
+number-first captions in the sidebar at its default width, where the 3D job's
+two clipped model captions kept their numbers, and a screenshot from it sets the
+status line inset. A third pass, on a ZIP with the measured status wrapping
+but before its later Studio popup width and hyphen amendments, ran in the
+sidebar at UI scales 1.0 and 2.0, with a 1122 px sidebar at 2.0. When a cached
+still was removed while its preview was being prepared, the tile kept its kind
+icon with an `ERROR` line, wrapped and aligned after the icon, and **Retry
+preview (N)**, which prepared the preview again: for a video's still and a
+decoded image at 1.0, and for the video at 2.0. At 2.0, four tiles fit one row
+with their numbers visible, and status, error and grouped loading lines wrapped
+inside the box with captions whole. Stills removed while idle were prepared
+again after a file reload, without **Retry preview (N)**. Online Access
+disabled, focus and viewport interaction while tiles update, the Studio pages
+at UI scale 2.0 and other platforms are not yet recorded; they remain #66 and
+#68 acceptance.
 
 ## Saved static model confirmation
 

@@ -3,6 +3,7 @@
 """Run installed-ZIP tests through tools/test_blender.py; refuse unguarded execution."""
 
 import argparse
+import faulthandler
 import importlib
 import importlib.abc
 import ipaddress
@@ -34,6 +35,7 @@ BASELINE = (
     "test_model_picker",
     "test_generation",
     "test_result_media",
+    "test_result_preview_tiles",
     "test_apply_image",
     "test_apply_material",
     "test_apply_3d",
@@ -95,6 +97,50 @@ BASELINE = (
     "test_workflow_references",
     "test_workflow_uploads",
 )
+
+
+# A test running longer than this dumps every thread's stack and carries on, so
+# a hang shows where it waits. The slowest installed test takes about ten seconds.
+TEST_WATCHDOG_SECONDS = 60
+
+
+class PromptResult(unittest.TextTestResult):
+    """Print each failure's traceback when its test ends, not only in the summary.
+
+    tools/test_blender.py stops Blender after its per-process timeout, before
+    unittest prints the summary, so the reasons for earlier failures would be
+    lost with it. A test running past ``TEST_WATCHDOG_SECONDS`` also dumps the
+    stack of every thread without stopping the run.
+    """
+
+    def startTest(self, test):
+        super().startTest(test)
+        try:
+            faulthandler.dump_traceback_later(TEST_WATCHDOG_SECONDS, exit=False)
+        except (AttributeError, OSError, RuntimeError, ValueError):
+            pass  # No file descriptor behind stderr: the summary still reports failures.
+
+    def stopTest(self, test):
+        faulthandler.cancel_dump_traceback_later()
+        super().stopTest(test)
+
+    def _prompt(self, record, *args):
+        failures, errors = len(self.failures), len(self.errors)
+        record(*args)
+        for flavour, items in (("FAIL", self.failures[failures:]), ("ERROR", self.errors[errors:])):
+            for test, details in items:
+                self.stream.writeln(f"{flavour} DETAILS: {self.getDescription(test)}")
+                self.stream.writeln(details)
+        self.stream.flush()
+
+    def addError(self, test, err):
+        self._prompt(super().addError, test, err)
+
+    def addFailure(self, test, err):
+        self._prompt(super().addFailure, test, err)
+
+    def addSubTest(self, test, subtest, err):
+        self._prompt(super().addSubTest, test, subtest, err)
 
 
 class NoSourceImports(importlib.abc.MetaPathFinder):
@@ -179,7 +225,7 @@ def main():
         suite = loader.discover(str(HERE), pattern="test_*.py")
     else:
         suite = loader.loadTestsFromNames(BASELINE)
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=PromptResult).run(suite)
     # Byte equality and module origins must still hold after tests execute.
     if sha256(args.zip) != args.sha256:
         raise RuntimeError("Candidate ZIP changed during tests")

@@ -14,7 +14,7 @@ import wave
 import zlib
 from contextlib import contextmanager
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import SimpleNamespace
 
 import httpx
@@ -25,6 +25,7 @@ from scenario.core.audio_waveform import EnvelopeBuilder, WaveformCanceled, Wave
 from scenario.core.jobs import result_previews as previews
 from scenario.core.jobs import transfers
 from scenario.core.jobs.coordinator import JobCoordinator
+from scenario.core.jobs.result_metadata import TEXTURE_ROLES, texture_role
 from scenario.core.jobs.results import ResultError
 from scenario.core.jobs.store import (
     JobIntent,
@@ -268,6 +269,14 @@ def test_preview_kinds_and_default_renditions():
     assert not previews.is_local("video", STILL)
 
 
+def test_every_texture_role_has_a_caption_label():
+    # A role without a label would caption its map with the kind's "Image".
+    assert set(previews.ROLE_LABEL) == TEXTURE_ROLES
+    assert all(isinstance(label, str) and label for label in previews.ROLE_LABEL.values())
+    record = {"mimeType": "image/png", "metadata": {"type": "3d-texture-roughness"}}
+    assert previews.ROLE_LABEL[texture_role(record)] == "Roughness"
+
+
 def test_key_binds_scope_request_asset_and_receipt(env):
     record = ready_job(env, "request", [("asset-video", "video/mp4", MP4)])
     item = record.results[0]
@@ -379,6 +388,159 @@ def test_metadata_failure_is_pending_then_failed_at_window_end(env):
 
 def final_key(env, asset_id="asset-video"):
     return env.coordinator.result_preview_targets("request", [asset_id])[0].key
+
+
+def png_header(width, height):
+    """Only a PNG signature, checked IHDR and IEND: the dimensions a file declares."""
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    ihdr = b"IHDR" + header
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", len(header))
+        + ihdr
+        + struct.pack(">I", zlib.crc32(ihdr))
+        + b"\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+
+
+def exr_attribute(name, kind, value):
+    return name + b"\x00" + kind + b"\x00" + struct.pack("<i", len(value)) + value
+
+
+def exr_channels(*names):
+    """A ``chlist`` value: half channels, linear flag, reserved bytes, sampling 1."""
+    return b"".join(name + b"\x00" + struct.pack("<iB3xii", 1, 0, 1, 1) for name in names) + b"\x00"
+
+
+def exr(
+    width,
+    height,
+    *,
+    display=None,
+    window_type=b"box2i",
+    end=True,
+    version=2,
+    channels=(b"R", b"G", b"B", b"A"),
+    extra=b"",
+):
+    """An OpenEXR header declaring channels, a data window and optionally a display window."""
+    data = b"\x76\x2f\x31\x01" + struct.pack("<I", version)
+    if channels is not None:
+        data += exr_attribute(b"channels", b"chlist", exr_channels(*channels))
+    data += exr_attribute(b"compression", b"compression", b"\x00")
+    data += exr_attribute(
+        b"dataWindow", window_type, struct.pack("<iiii", 0, 0, width - 1, height - 1)
+    )
+    if display is not None:
+        data += exr_attribute(
+            b"displayWindow", b"box2i", struct.pack("<iiii", 0, 0, display[0] - 1, display[1] - 1)
+        )
+    return data + extra + (b"\x00" + b"\x00" * 64 if end else b"")
+
+
+@pytest.mark.parametrize(
+    "data,size",
+    [
+        (exr(4096, 2048), (4096, 2048)),
+        (exr(64, 32, display=(128, 16)), (128, 32)),
+        (exr(64, 32, version=0x202), (64, 32)),
+        (exr(64, 32, window_type=b"box2f"), None),
+        (exr(64, 32, end=False), None),
+        (png_header(9, 4), (9, 4)),
+        (jpeg(640, 480), (640, 480)),
+        (b"\x76\x2f\x31\x01", None),
+    ],
+)
+def test_local_image_size_reads_declared_dimensions(data, size):
+    assert previews.local_image_size(data) == size
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # Blender sizes every part by the first one and crashed on a larger later part.
+        exr(16, 16, version=0x1002),
+        exr(16, 16, version=0x802),
+        exr(16, 16, version=0x2002),
+        exr(16, 16, version=1),
+        # Layered channels load as a multilayer image with no single picture.
+        exr(16, 16, channels=(b"diffuse.R", b"diffuse.G", b"diffuse.B")),
+        exr(16, 16, channels=None),
+        exr(16, 16, channels=()),
+        exr(16, 16, extra=exr_attribute(b"channels", b"chlist", exr_channels(b"Y"))),
+        exr(16, 16, channels=None, extra=exr_attribute(b"channels", b"chlist", b"R\x00\x01\x00")),
+        exr(16, 16, extra=exr_attribute(b"dataWindow", b"box2i", bytes(16))),
+        exr(16, 16, extra=exr_attribute(b"type", b"string", b"deepscanline")),
+        exr(16, 16, extra=exr_attribute(b"type", b"string", b"multipart")),
+    ],
+    ids=[
+        "multi-part",
+        "deep",
+        "unknown-flag",
+        "version-1",
+        "layered",
+        "no-channels",
+        "empty-channels",
+        "duplicate-channels",
+        "truncated-channels",
+        "duplicate-window",
+        "deep-type",
+        "unknown-type",
+    ],
+)
+def test_openexr_files_that_are_not_one_single_part_image_read_as_undeclared(data):
+    assert previews.local_image_layout(data) is None
+    assert previews.local_image_size(data) is None
+
+
+def test_openexr_channels_bound_the_decoded_samples():
+    names = tuple(b"C%d" % index for index in range(64))
+    assert previews.local_image_layout(exr(64, 32, channels=(b"Y",))) == (64, 32, 4)
+    assert previews.local_image_layout(exr(2048, 2048, channels=names)) == (2048, 2048, 64)
+    assert previews.local_image_layout(
+        exr(64, 32, extra=exr_attribute(b"type", b"string", b"tiledimage"))
+    ) == (64, 32, 4)
+    assert previews.bounded_local_image(8192, 4096, 4)
+    assert previews.bounded_local_image(2048, 1024, 64)
+    assert not previews.bounded_local_image(2048, 2048, 64)
+    assert not previews.bounded_local_image(64, 32, "4")
+
+
+@pytest.mark.parametrize(
+    "media_type,data,reason",
+    [
+        ("image/png", png_header(previews.LOCAL_IMAGE_MAX_EDGE + 1, 1), "too large"),
+        ("image/png", png_header(8192, 4097), "too large"),
+        ("image/x-exr", exr(9000, 8), "too large"),
+        (
+            "image/x-exr",
+            exr(2048, 2048, channels=tuple(b"C%d" % i for i in range(64))),
+            "too large",
+        ),
+        ("image/x-exr", exr(64, 32, end=False), "readable dimensions"),
+        ("image/x-exr", exr(16, 16, version=0x1002), "readable dimensions"),
+        ("image/x-exr", exr(16, 16, channels=(b"layer.R",)), "readable dimensions"),
+        ("image/jpeg", jpeg(4, 4).replace(b"\xff\xc0", b"\xff\xe1"), "readable dimensions"),
+        ("image/webp", webp(4, 4)[:24], "readable dimensions"),
+    ],
+)
+def test_local_image_dimensions_bound_the_main_thread_decode(env, media_type, data, reason):
+    ready_job(env, "request", [("asset-image", media_type, data)])
+    result = outcome(run(env, work(env, "request", [STILL])))
+    assert result.state == State.FAILED and reason in result.reason
+    assert result.request is None and work_directories(env) == []
+
+
+@pytest.mark.parametrize(
+    "media_type,data",
+    [("image/png", png_header(8192, 4096)), ("image/x-exr", exr(4096, 2048, display=(4096, 2048)))],
+)
+def test_bounded_local_images_get_a_decode_request(env, media_type, data):
+    ready_job(env, "request", [("asset-image", media_type, data)])
+    result = outcome(run(env, work(env, "request", [STILL])))
+    assert result.state == State.DECODE and result.request.source.read_bytes() == data
+    env.coordinator.discard_result_preview(result.request, root=env.cache)
+    assert work_directories(env) == []
 
 
 @pytest.mark.parametrize("count", [1, 2])
@@ -527,6 +689,48 @@ def test_cache_paths_keep_the_canonical_root_spelling(env, monkeypatch):
     assert published.path.is_relative_to(root) and (published.width, published.height) == (4, 2)
     env.coordinator.discard_result_preview(other, root=env.cache)
     assert work_directories(env) == []
+
+
+@pytest.mark.parametrize(
+    "path, root, inside",
+    [
+        # Windows: the cache's extended spelling below the configured root.
+        (r"\\?\D:\cache\result-previews\v1\s\k\still.png", r"D:\cache\result-previews", True),
+        (r"\\?\d:\Cache\Result-Previews\v1\still.png", r"D:\cache\result-previews", True),
+        (r"\\?\D:\cache\result-previews\v1\still.png", r"\\?\D:\cache\result-previews", True),
+        (r"D:\cache\result-previews\v1\still.png", r"D:\cache\result-previews", True),
+        (r"\\?\UNC\host\share\previews\v1\still.png", r"\\host\share\previews", True),
+        (r"\\?\D:\cache\other\still.png", r"D:\cache\result-previews", False),
+        (r"\\?\D:\cache\result-previews-x\still.png", r"D:\cache\result-previews", False),
+        (r"\\?\E:\cache\result-previews\still.png", r"D:\cache\result-previews", False),
+        (r"\\?\UNC\host\other\previews\still.png", r"\\host\share\previews", False),
+        (r"\\.\D:\cache\result-previews\still.png", r"D:\cache\result-previews", False),
+    ],
+)
+def test_windows_cache_paths_are_in_the_configured_root(path, root, inside):
+    """Adapted from a Windows CI failure: no icon was ever built from a ready still.
+
+    The cache returns ``\\\\?\\D:\\...`` paths while the scheduler holds ``D:\\...``,
+    which pathlib's ``is_relative_to`` never relates.
+    """
+    path, root = PureWindowsPath(path), PureWindowsPath(root)
+    assert previews.in_cache(path, root) is inside
+    if inside and str(path).startswith("\\\\?\\") and not str(root).startswith("\\\\?\\"):
+        assert not path.is_relative_to(root)  # The check the icon step used before.
+
+
+@pytest.mark.parametrize(
+    "path, inside",
+    [
+        ("/cache/result-previews/v1/s/k/still.png", True),
+        ("/cache/result-previews", True),
+        ("/cache/result-previews-x/still.png", False),
+        ("/cache/other/still.png", False),
+    ],
+)
+def test_posix_cache_paths_compare_unchanged(path, inside):
+    root = PurePosixPath("/cache/result-previews")
+    assert previews.in_cache(PurePosixPath(path), root) is inside
 
 
 @pytest.mark.parametrize(
