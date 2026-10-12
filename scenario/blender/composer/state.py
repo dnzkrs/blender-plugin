@@ -6,6 +6,20 @@ from ...core.ui.composer_layout import LANE_ORDER, DoubleClick, TextField
 from .. import props
 
 COMPOSER_LANES = tuple(LANE_ORDER)
+# Regions whose last drawn job strip a click is checked against; more windows than this are rare.
+DRAWN_STRIP_LIMIT = 32
+# Jobs whose last offered actions the strip holds while a status refresh is running.
+OFFERED_LIMIT = 64
+# Scene lanes whose dismissed strip stays hidden; per-shot scenes come and go in one session.
+DISMISSED_LIMIT = 64
+
+
+def _bounded(cache, key, value, limit):
+    """Store `value` as the newest entry of `cache`, dropping the oldest beyond `limit`."""
+    cache.pop(key, None)
+    cache[key] = value
+    while len(cache) > limit:
+        del cache[next(iter(cache))]
 
 
 class ComposerState:
@@ -32,6 +46,44 @@ class ComposerState:
         # A press with no Python type and no text reached the focused prompt, with no release or other press
         # since. An input-method composition starts with two in a row; a dead key sends one, then its release.
         self.untyped_press = False
+        # Job strip display state, Python only and never saved: a file load starts over.
+        # (scene session_uid, lane) -> request ID of the job whose strip the user dismissed
+        self.dismissed = {}
+        # region key -> what its last drawn strip offered (strip_signature), for the click guard
+        self.drawn_strips = {}
+        # request ID -> (saved revision, action descriptors) last offered while no command ran
+        self.offered = {}
+
+    def dismiss(self, key, request_id):
+        """Hide the strip of `request_id` for this scene lane; a newer job there shows again."""
+        _bounded(self.dismissed, key, request_id, DISMISSED_LIMIT)
+
+    def is_dismissed(self, key, request_id):
+        return self.dismissed.get(key) == request_id
+
+    def remember_strip(self, region_key, signature):
+        """Record what a region's strip showed; None when it shows none."""
+        if signature is None:
+            self.drawn_strips.pop(region_key, None)
+        else:
+            _bounded(self.drawn_strips, region_key, signature, DRAWN_STRIP_LIMIT)
+
+    def shown_actions(self, request_id, revision, actions, busy):
+        """(actions, held): the actions the strip shows for a job, and whether they are held.
+
+        `busy` means the job offers no action now: a status refresh or another command is running.
+        The strip then keeps the actions last offered for the same saved revision instead of blinking
+        every poll. The poll that starts a command lists the job's actions just before starting it,
+        so until the next poll the view still lists them: those are held too, and remembered. Held
+        actions are for display only: a click on one waits for the command to finish."""
+        actions = tuple(actions)
+        if actions or not busy:
+            _bounded(self.offered, request_id, (revision, actions), OFFERED_LIMIT)
+            return actions, busy
+        offered = self.offered.get(request_id)
+        if offered is not None and offered[0] == revision:
+            return offered[1], bool(offered[1])
+        return (), False
 
     def lane_for(self, scene):
         """The composer drives the six generation lanes; other tabs (Generations, MCP, 3D tools) fall back to Image."""
@@ -84,6 +136,14 @@ class ComposerState:
         if not same_scene or scene.scenario.lane_state(self.synced_lane) is None:
             return None
         return props.form_tab(self.synced_lane), self.synced_lane
+
+    def shown_form(self, scene):
+        """(tab, lane) the card describes: the form behind the visible tab, or until Esc, the
+        original form of a replaced focused prompt. Its job strip follows the same form."""
+        original = self.replaced_form(scene)
+        if original is not None:
+            return original
+        return self.lane_for(scene), self.generation_lane(scene)
 
     def commit_to_lane(self, scene):
         """Write the field into the form it was synchronized from, never into one that replaced it."""

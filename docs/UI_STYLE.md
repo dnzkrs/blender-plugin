@@ -377,10 +377,11 @@ nothing.
 - Drawing and hit testing share one layout, so every control is drawn exactly
   where a click reaches it.
 
-Only the side regions are avoided so far. Horizontal regions drawn over the
-viewport are not: the asset shelf along the bottom (in Pose Mode, for example),
-the tool header and a transparent header along the top can still cover part of
-the composer or its default spot.
+The card and the pill avoid only the side regions so far. Horizontal regions
+drawn over the viewport are not avoided by them: the asset shelf along the
+bottom (in Pose Mode, for example), the tool header and a transparent header
+along the top can still cover part of the composer or its default spot. The
+[job strip](#compact-job-strip) does avoid them.
 
 Installed tests cover these rules with synthetic overlapping regions, including
 the modal's move, resize and release handlers with the sidebar opened and
@@ -399,15 +400,17 @@ acceptance check under #66.
 
 ### Double-click
 
-A double-click on the card background or its resize corner puts the composer
-back at its default place and width, and a double-click in the prompt selects
-the word (or the run of spaces) under the pointer, so typing replaces it.
+A double-click on the card background, its resize corner or the
+[job strip](#compact-job-strip)'s background puts the composer back at its
+default place and width, and a double-click in the prompt selects the word (or
+the run of spaces) under the pointer, so typing replaces it.
 
 Blender never hands a modal operator a double-click: before calling it, the
 window manager turns the second press into a plain press (only key maps see the
 double-click value), in Blender 5.0, 5.1 and 5.2 alike. The composer therefore
 pairs presses itself, by Blender's rule. A press completes a double-click when
-it lands on the same composer target as the previous press, less than Blender's
+it lands on the same composer target (a control, the card or strip background,
+the prompt or a strip chip) as the previous press, less than Blender's
 double-click time preference after it (350 ms by default) and within the
 composer's 4 px drag threshold times the UI scale. Another key or button
 pressed in between (Escape, which cancels a held press, included), a drag or
@@ -418,15 +421,18 @@ the button is held keeps the press. Time is taken when the composer handles
 each press, since Python events carry no timestamp. A click that changes the
 layout under the pointer (the pill expanding into the card) never pairs with
 the next press. On any other control the second press of a double-click does
-nothing more, so a double-click on Generate submits once.
+nothing more, so a double-click on Generate submits once and one on a strip
+chip runs its operator, or opens its dialog, once.
 
 Installed tests send the composer's modal what Blender really delivers, two
 press and release pairs at pinned times, and check the word selection, the
 reset, the timing and distance limits, jitter on the resize corner, the presses
-that start over (Escape included) and the single submission. Unit tests cover
-the pairing rule itself. Physical double-clicks on Blender 5.1.2 macOS selected
-nothing and reset nothing before this change; a physical recheck remains
-under #66.
+that start over (Escape included) and the single submission. Job strip tests
+send the same pairs to the strip's background, which resets the placement
+within the time and distance limits only, and to a strip chip, which dispatches
+once. Unit tests cover the pairing rule itself. Physical double-clicks on
+Blender 5.1.2 macOS selected nothing and reset nothing before pairing; a
+physical recheck, the strip included, remains under #66.
 
 ### Errors and file loads
 
@@ -435,7 +441,8 @@ the composer starts one, and so does a pointer move anywhere in a 3D viewport
 while the prompt is focused. The session lasts until a click outside the
 composer, or until the pointer leaves it while the prompt is unfocused. A
 refused Generate, such as a failed poll or an error report from the submission,
-is reported as a warning and the session goes on. If handling any other event
+is reported as a warning and the session goes on, and so is an error from the
+operator a [job strip](#compact-job-strip) chip runs. If handling any other event
 raises, whether a click, a key, a pointer move or a drag, the composer ends its
 session and Blender reports the error. So does an error that F2 or a
 composition's second press raises while opening the
@@ -543,6 +550,96 @@ presses and a popover confirmation to a replaced form and to a form whose model
 takes no prompt, and check that neither form's prompt changes.
 Physical composition, dead keys, candidate-window placement and focus after the
 popover have not been checked on a desktop; they remain under #66.
+
+## Compact job strip
+
+The expanded composer shows the current job of the form it describes in a
+separate tray as wide as the card: the newest job this Blender session
+submitted from that scene and form, through the composer, the sidebar or MCP
+`generate`. Its scene and form come from the display-only
+[scene lane binding](BLENDER_JOB_CONTEXT.md#remote-progress-and-scene-lane-binding);
+workflow, Film, restarted and recovered jobs have none, so they never appear
+here and stay in Jobs. Another scene, another lane tab or another connection
+shows its own job or no tray.
+
+- The tray sits above the card, else below it, else it is hidden; the card's
+  controls never move. It stays in the span the toolbar and sidebar leave
+  uncovered and wholly between the headers, tool header and asset shelf drawn
+  over the viewport. The collapsed pill draws only a thin line inside its
+  bottom edge in the job's tone; it keeps its own click.
+- One line reads title · status · price · +N more, cut with an ellipsis. The
+  status uses the [strip wording](../scenario/core/ui/job_strip.py), whose remote
+  words are the Jobs rows' words capitalized (`Waiting`, `Queued`, `Starting`,
+  `Generating`, `Finishing`), with a tone dot that is never the only signal.
+  While a job is active, a thin bar under the line fills to the reported
+  percentage from 1% to 99%, else it stays a dim full track. Unlike the Jobs
+  bar, it shows no percentage while finishing. Without online access, states
+  that wait on Scenario add `(offline)`;
+  a remote reading that polling is not keeping current adds `(last known)`.
+  A paused delivery's own message replaces the status in the review tone, and
+  **Inspect** shows it in full. **+N more** counts the form's other jobs that
+  are not applied, canceled or failed.
+- Chips come only from the shared
+  [saved-job action descriptors](BLENDER_JOB_CONTEXT.md#active-saved-job-controls):
+  **Inspect**, which is never dropped, and at most one primary action before it:
+  a receipt retry, a cancellation, download recovery, the single result action,
+  or **Apply... (N)** / **Reuse... (N)**, which opens the job card to choose.
+  As in Jobs, **Cancel generation** appears only once a poll confirmed an
+  inference job, the only type Scenario documents as cancellable.
+  A submission in flight or unconfirmed, and an Image result being imported
+  automatically, offer only Inspect. Refresh is never a chip; the pump polls.
+  On a narrow tray the primary chip is dropped before the line gets shorter
+  than 96 px at 1x; the tray hides when even Inspect does not fit.
+- A chip runs its existing operator with `INVOKE_DEFAULT`, never `EXEC`, so the
+  operator's own confirmation or destination dialog is the approval. Before
+  dispatch, the click is compared with what the region last drew (request,
+  saved revision and chips); a job that changed since consumes the click with
+  *The job changed; check its updated actions*. A focused prompt is committed to
+  its own form first, with the same guard as a click outside: a conflicting
+  edit keeps focus and both texts and dispatches nothing.
+- The job offers no action while an automatic status refresh or another command
+  runs, except a prepared job's local cancellation. The tray keeps showing the
+  actions it last offered for the same saved revision instead of blinking every
+  poll, including those the poll that starts the command still lists until the
+  next poll, but then only the chips that open the job card (**Inspect**,
+  **Apply... (N)** and **Reuse... (N)**) dispatch; another chip answers *The job
+  is updating; try again in a moment*.
+- The cross hides that job's tray for its scene and form. The job continues in
+  Jobs; a newer job there shows the tray again, and loading a file forgets
+  dismissals. Only the 64 most recent dismissed scene forms are remembered, so
+  an older one's tray can show again.
+- **Inspect** opens a native job card: an unfinished job as its Jobs row, a
+  finished one as its Generations result, always expanded, plus **Show all jobs
+  in the sidebar**. The pump refreshes the open card like Studio. A job this
+  connection no longer shows offers **Inspect saved jobs**. The card reuses the
+  Generations result drawing, including its existing file-based image actions,
+  which do not take durable application claims; the tray's own chips use only
+  claim-backed descriptors.
+
+Drawing reads ModelJobs' in-memory views and bindings only: it creates no job
+owner or session, reads no saved job and writes no scene, WindowManager or job
+state. Its only writes are the composer's Python display caches (the drawn
+signature per region and the held actions); dismissals, which the modal
+records, are Python only too, and a file load clears all three. Each keeps only
+its newest entries: 32 regions, 64 jobs and 64 scene forms. Drawing and the
+modal share one geometry, so a chip is hit where it is drawn; a press on the
+tray's background drags the composer, and a [double-click](#double-click) there
+resets its placement, since the modal pairs presses on that same geometry.
+
+Installed tests on the packaged ZIP drive the real draw handler with recording
+primitives and the real modal handler with synthetic events over jobs submitted
+through the synthetic SDK transport. They check the line, chips, bar and caches
+with draw-time ensure calls and store reads patched to fail; each chip's
+`INVOKE_DEFAULT` call and exact descriptor properties; the stale-click, busy and
+focused-prompt guards, the busy guard also on the poll that starts a refresh;
+dismissal, its bound and file load; scene, lane and credential
+changes; an unconfirmed submission offering only Inspect; a job Scenario has
+not confirmed as an inference job offering no cancellation; a double-click on
+the background and on a chip; and **Resume download** through the real operator
+downloading once without a paid request.
+Physical desktop evidence is pending: the dialogs and popup a chip opens from
+inside the composer modal, viewport input afterwards, alternate UI scales and
+screenshots need an unlocked desktop session under #66 and #68.
 
 ## What Blender cannot do (so we do not fake it)
 
