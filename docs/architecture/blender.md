@@ -173,8 +173,8 @@ identities are rechecked around decoding without GUI-thread copying or hashing.
 Session-owned [native/MCP review controls](../FILM_PLAN.md#native-and-mcp-review-controls)
 separate preparation from the build approval. Drawing reads cached status, the
 maintenance pump advances work, and the build runs on the main thread only in
-Object Mode in a Blender window. The portable case-study bundle and live/desktop
-acceptance remain pending.
+Object Mode in a Blender window. The [portable case-study bundle](#film-case-study-bundle)
+packs a built review; live/desktop acceptance remains pending.
 
 ## Film video export
 
@@ -195,3 +195,30 @@ verification levels, cancellation and crash leftovers. Session-owned
 inspect review scenes and snapshot on the main thread, separate the destination
 choice from the render approval and read cached status while drawing; the
 maintenance pump delivers outcomes. Desktop interaction remains pending.
+
+## Film case-study bundle
+
+[`film_case_study.py`](../../scenario/blender/film_case_study.py) inspects review
+scenes and director timelines, follows the chosen scenes' data with
+`bpy.data.user_map`, stamps the external files they read and writes one private
+snapshot with absolute paths on the main thread, without changing the working
+file, scenes, frame or media paths. It refuses linked data and data that cannot
+travel before any approval. The bundled
+[`film_case_study_worker.py`](../../scenario/blender/film_case_study_worker.py)
+edits only that snapshot in an offline child: it fills each rewritten path field
+with the longest value Blender stores there before setting its bundle-relative
+value, rebuilds sound strips so their hidden paths are relative, repacks packed
+images and removes Scenario properties that name jobs, assets or productions
+together with the extension's registered settings, which Blender 5 stores apart
+from custom properties. The main thread scans for identifier-like values of
+everything removed, including nested groups, lists and byte strings in settings,
+node trees, master collections and strips; descriptive settings such as model
+choices are skipped. Rewritten paths and image strip frames use `/`: Blender
+converts every path to the native separator, `\` on Windows, when it opens a
+file, and `os.path.join` reads a `//` folder as a Windows network share. A second
+child reopens the written library and reports its file references with `/`
+separators, because its listing joins a strip's folder and file name with the
+native separator. Media copies, checks, private scans
+and the archive run in bpy-free core code on the session-owned export thread. See
+the [bundle contract](../FILM_PLAN.md#portable-case-study-bundle). Drawing reads
+cached status; desktop interaction remains pending.

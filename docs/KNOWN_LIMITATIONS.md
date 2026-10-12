@@ -80,11 +80,20 @@ establish live generation or full render-lane desktop acceptance.
   review, and one export runs at a time. An edit made to the review scene without
   showing it, for example from a script, is noticed only at approval and only when
   it changes the frames, rate, size, strip or media counts or audible sound shown.
-  The Studio case-study bundle is unavailable. Export verification uses an
-  installed ffprobe when present and otherwise a weaker Blender decode check.
-  Blender builds without H.264/AAC encoders cannot export; they are detected only
-  when the render child fails, with its log retained. Complete runtime adoption
-  and live/native acceptance remain open
+  A [portable case-study bundle](FILM_PLAN.md#portable-case-study-bundle) packs a
+  built review, an optional timeline with its shots, their media, the sanitized
+  recipe and a production ledger into a new ZIP; it shares that thread, refuses
+  linked data (including the Essentials brushes a scene links once a sculpt or
+  paint mode was used in it), movie clips, packed sound strip audio, image
+  sequences and other unportable data, keeps model IDs in the recipe and cannot
+  clear Blender's unused bytes of earlier settings, so review a bundle before
+  publishing it widely. It notices an edit of its unshown scenes only through the
+  review's frames, rate, size and strip count, the scene and media counts and bytes
+  and the ledger. It has installed synthetic coverage only. Video export
+  verification uses an installed ffprobe when present and otherwise a weaker
+  Blender decode check. Blender builds without H.264/AAC encoders cannot export;
+  they are detected only when the render child fails, with its log retained.
+  Complete runtime adoption and live/native acceptance remain open
   ([#64](https://github.com/scenario-labs/blender-plugin/issues/64),
   [#65](https://github.com/scenario-labs/blender-plugin/issues/65)).
 - Credentials use one explicitly selected pair (saved Blender preferences by

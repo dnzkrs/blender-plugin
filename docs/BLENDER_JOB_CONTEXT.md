@@ -164,6 +164,20 @@ change, Undo/Redo or scene reselection invalidates a ready export, while a runni
 export keeps its snapshot. Shutdown closes the handles, removing their private
 staging, only once the export thread has stopped.
 
+`JobSession.export_case_study` admits one approved
+[case-study bundle](FILM_PLAN.md#portable-case-study-bundle) on the same export
+thread with the same checks, a `.zip` destination and a specification whose child
+is this Blender running the bundled case-study worker. `publish_film_export` also
+copies a verified staged archive, keeping the `.zip` suffix. `JobSession.film_case_study`
+(`FilmCaseStudyCommands`) extends the export handles: inspection also captures
+each director timeline's and shot scene's origin, a ready case study binds them
+with the recipe and review scene origins, and approval rereads the review bounds,
+then snapshots and builds the sanitized documents from this scope's saved jobs and
+uploads on the main thread. Its synchronizations also run inside
+`JobSession.synchronizing`.
+Video exports and case studies refuse each other's approval without consuming it
+while one runs. The handles close with the export handles once the thread has stopped.
+
 ## Film media preparation ownership
 
 `JobSession.prepare_film_composition` captures the supplied current origin and
