@@ -1069,6 +1069,55 @@ class ComposerSideRegionTests(unittest.TestCase):
             self._clicks(operator, ctx, third, (10.0 + 2 * quick,))
             self.assertEqual((save.call_count, state.offset), (1, saved))
 
+    def test_an_untyped_key_between_two_clicks_starts_over_and_a_click_ends_a_composition_run(self):
+        # A dead key or an input-method event reaches the modal with no Python type: between two clicks
+        # it is a key like any other, and a click between two such presses is no composition either.
+        scene = bpy.context.scene
+        scene.scenario.lane = "image"
+        scene.scenario.lane_state("image").prompt = "hello world"
+        ctx = self._context(sidebar=False)
+        ctx.window_manager = SimpleNamespace(scenario_composer_text="")  # the popover opens empty
+        quick = self._double_click_seconds() / 2
+        state = self.state_mod.ComposerState()
+        state.expanded = True
+        state.sync_from_lane(scene)
+        point, index = self._word_point(ctx, state)
+        call_panel = mock.Mock(return_value={"INTERFACE"})
+        ops = SimpleNamespace(wm=SimpleNamespace(call_panel=call_panel))
+        with (
+            mock.patch.object(self.runtime.state, "composer", state),
+            mock.patch.object(self.modal, "bpy", SimpleNamespace(ops=ops)),
+        ):
+            operator = self._operator()
+            self._clicks(operator, ctx, point, (10.0,))
+            self.assertTrue(state.focused)
+            # a dead key's press and release between the two clicks: two caret presses, no selection
+            self._event(operator, ctx, "", "PRESS", point)
+            self._event(operator, ctx, "", "RELEASE", point)
+            self._clicks(operator, ctx, point, (10.0 + quick,))
+            self.assertIsNone(state.field.selection)
+            self.assertEqual(state.field.caret, index)
+            # an untyped press, a click in the prompt, another untyped press: no text field
+            self._event(operator, ctx, "", "PRESS", point)
+            self._clicks(operator, ctx, point, (20.0,))
+            self._event(operator, ctx, "", "PRESS", point)
+            call_panel.assert_not_called()
+            # a modal session that ends forgets both runs
+            operator._finish(ctx)
+            self._event(operator, ctx, "", "PRESS", point)
+            call_panel.assert_not_called()
+            self.assertTrue(state.focused)
+            self._clicks(operator, ctx, point, (30.0,))
+            operator._finish(ctx)
+            self._clicks(operator, ctx, point, (30.0 + quick,))
+            self.assertIsNone(state.field.selection)
+            # the same context opens the popover on two untyped presses in a row
+            self._event(operator, ctx, "", "PRESS", point)
+            self._event(operator, ctx, "", "PRESS", point)
+            call_panel.assert_called_once()
+        operator.report.assert_not_called()
+        self.assertEqual(scene.scenario.lane_state("image").prompt, "hello world")
+
     def test_a_double_click_on_generate_submits_once(self):
         scene = bpy.context.scene
         scene.scenario.lane = "image"
@@ -1146,6 +1195,7 @@ class ComposerSideRegionTests(unittest.TestCase):
             oskey=False,
             alt=False,
             unicode=unicode,
+            is_repeat=False,
         )
         return self.modal.SCENARIO_OT_composer_modal.modal(operator, context, event)
 
@@ -1751,6 +1801,91 @@ class ComposerEditFormTests(unittest.TestCase):
         operator.report.assert_called_once_with({"WARNING"}, "This model takes no prompt")
         self.assertEqual(self.edit3d.prompt, "rusty iron plates")
         self.assertEqual(self.drawn().fields, ["This model takes no prompt"])
+
+    def key(self, key="", text=""):
+        """Deliver one key press, named or with no Python type, with Blender's text field recorded, not opened."""
+        self.runtime.state.composer_modal_running = True
+        wm = bpy.context.window_manager
+        context = SimpleNamespace(scene=self.scene, region=MagicMock(), window_manager=wm)
+        event = SimpleNamespace(
+            type=key,
+            value="PRESS",
+            mouse_region_x=10,
+            mouse_region_y=10,
+            shift=False,
+            ctrl=False,
+            oskey=False,
+            alt=False,
+            unicode=text,
+            is_repeat=False,
+        )
+        operator = SimpleNamespace(report=MagicMock(), _finish=MagicMock())
+        call_panel = MagicMock(return_value={"INTERFACE"})
+        ops = SimpleNamespace(wm=SimpleNamespace(call_panel=call_panel))
+        with (
+            patch.object(self.modal, "_layout") as layout,
+            patch.object(self.modal, "bpy", SimpleNamespace(ops=ops)),
+        ):
+            layout.return_value.hit.return_value = None
+            layout.return_value.scale = 1.0
+            result = self.modal.SCENARIO_OT_composer_modal.modal(operator, context, event)
+        self.assertEqual(result, {"RUNNING_MODAL"})
+        return operator, call_panel
+
+    def confirm_text_field(self, text):
+        """Confirm Blender's text field with `text`, as Enter in the popover does."""
+        wm = bpy.context.window_manager
+        self.runtime.state.last_message = ""
+        wm.scenario_composer_text = text
+        self.assertEqual(wm.scenario_composer_text, "")
+
+    def test_text_field_types_into_the_edit_form_the_composer_shows(self):
+        self.drawn()
+        self.composer.focused = True
+        self.confirm_text_field(" 日本")
+        self.assertEqual(self.edit3d.prompt, "rusty iron plates 日本")
+        self.assertEqual(self.three_d.prompt, "a teapot")
+        self.assertTrue(self.composer.focused)
+
+    def test_input_method_text_never_reaches_the_form_that_replaced_it(self):
+        # A key with text Blender cannot name, F2, and a composition's second press all type into the prompt.
+        for keys in ((("", "é"),), (("F2", ""),), (("", ""), ("", ""))):
+            with self.subTest(keys=keys):
+                self.focus_text_form()
+                for key, text in keys:
+                    operator, call_panel = self.key(key, text)
+                call_panel.assert_not_called()
+                operator.report.assert_called_once()
+                self.assertIn("Esc", operator.report.call_args.args[1])
+                self.assertTrue(self.composer.focused)
+                self.assertEqual(self.composer.field.text, "a teapot")
+                self.assert_prompts_unchanged()
+        # Blender's text field may be confirmed after the form changed: neither form takes its text.
+        self.focus_text_form()
+        self.confirm_text_field("日本")
+        self.assertTrue(self.composer.focused)
+        self.assertEqual(self.composer.field.text, "a teapot")
+        self.assert_prompts_unchanged()
+        self.assertIn("Esc", self.runtime.state.last_message)
+
+    def test_input_method_text_leaves_a_form_without_a_prompt(self):
+        self.drawn()
+        # Another window or a tool loads an Edit task without a prompt into the focused form.
+        self.retopology("rusty iron plates")
+        for keys in ((("", "é"),), (("F2", ""),), (("", ""), ("", ""))):
+            with self.subTest(keys=keys):
+                self.composer.focused = True
+                for key, text in keys:
+                    operator, call_panel = self.key(key, text)
+                call_panel.assert_not_called()
+                operator.report.assert_called_once_with({"WARNING"}, "This model takes no prompt")
+                self.assertFalse(self.composer.focused)
+                self.assertEqual(self.edit3d.prompt, "rusty iron plates")
+        self.composer.focused = True
+        self.confirm_text_field("日本")
+        self.assertFalse(self.composer.focused)
+        self.assertEqual(self.edit3d.prompt, "rusty iron plates")
+        self.assertEqual(self.runtime.state.last_message, "This model takes no prompt")
 
 
 class ComposerEditFormFixtureTests(unittest.TestCase):

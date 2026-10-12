@@ -29,6 +29,9 @@ class ComposerState:
         self.moved = False
         # pairs the presses of a double-click, which the modal only receives as presses
         self.presses = DoubleClick()
+        # A press with no Python type and no text reached the focused prompt, with no release or other press
+        # since. An input-method composition starts with two in a row; a dead key sends one, then its release.
+        self.untyped_press = False
 
     def lane_for(self, scene):
         """The composer drives the six generation lanes; other tabs (Generations, MCP, 3D tools) fall back to Image."""
@@ -97,6 +100,15 @@ class ComposerState:
         self.commit_to_lane(scene)
         self.focused = False
         self.dragging = False
+
+    def type_text(self, scene, text):
+        """Type `text` at the caret as typed keys would: it replaces a selection and is committed to the lane.
+
+        A prompt without focus takes it at its last caret, or at the end when its lane prompt changed since."""
+        if not self.focused:
+            self.sync_from_lane(scene)
+        self.field.insert(text)
+        return self.commit_to_lane(scene)
 
     def flush_focused_prompt(self, scene):
         """Leave text focus only after committing to the unchanged original form."""

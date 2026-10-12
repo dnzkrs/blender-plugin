@@ -386,11 +386,72 @@ the pairing rule itself. Physical double-clicks on Blender 5.1.2 macOS selected
 nothing and reset nothing before this change; a physical recheck remains
 under #66.
 
+## Composer text input
+
+The composer prompt is custom drawing fed by key events. Blender composes
+input-method (IME) text only in its own text fields: an add-on can neither turn
+composition on nor read it. Its composition events reach a modal operator with
+no Python event type (reading one returns an empty string and logs a warning)
+and no text. The composer therefore hands such text to a native field instead of
+drawing a pre-edit it cannot receive.
+
+- **F2** in the focused prompt opens a popover with one native text field, as F2
+  rename does: the label **Type into the Image prompt** (the current tab's name),
+  the field editing on display (`activate_init`), and the dimmed hint
+  **Enter adds it to the prompt, Esc cancels**.
+- The field starts empty. Blender selects all of a native field's text when it
+  starts editing, so a field holding the whole prompt would replace it with the
+  first composed character. Enter types the field's text at the prompt's caret,
+  replacing a selection, as typed keys would; the composer keeps its focus.
+- A composition that starts in the focused prompt opens the same popover, so it
+  continues in a field that shows it. Left pending, it can land in the next
+  native text field that opens, such as an Outliner rename: Blender 5.1.2 and
+  5.2.1 insert a pending composition into a field on a click outside it.
+- A composition starts with two presses in a row that have no Python type and
+  no text: its start, then its first update. A dead key sends one such press,
+  then its release or the key carrying the accented character, so the popover
+  opens on the second press only. A release, a placement drag, an untyped event
+  without focus, any named or text-carrying press in between (a click included)
+  or the end of the composer's modal session starts the count again. Each
+  untyped press is also a key between two clicks, so it starts
+  [double-click](#double-click) pairing over, as any other key does. A key
+  repeat (a held key) does not count: Blender never marks input-method events
+  as repeats. In an input mode that commits each key, the first key's text
+  arrives in that second press, which the composer consumes, so that character
+  is lost.
+- An untyped key that carries text (French ù, for example) is typed like a named
+  key: without Ctrl, Cmd or Alt, at the caret. The modal reads each event's type
+  once and handles an untyped event without reading it again, so each untyped
+  event logs one warning rather than one per comparison.
+- Drawing the popover reads the composer state and changes nothing. The field's
+  update callback types the text and empties its window-manager property.
+- Text from these paths follows the composer's form rules for typed keys (see
+  [Buttons](#buttons)). When another form replaced the one the focused prompt
+  belongs to, an untyped key with text, F2 and a composition's second press are
+  refused with the same warning, open no popover, and the prompt keeps its focus
+  and original text until Esc. When the form's model takes no prompt, they leave
+  focus with *This model takes no prompt*. A refused composition is not handed
+  to a field, so it can still stay pending. A popover confirmed after its form
+  changed in either way adds nothing to either form, and the add-on's status
+  message says why.
+
+Installed tests drive the modal with synthetic untyped, dead-key and F2 events
+(the popover call stubbed), set the field property and draw the panel into a
+recording layout. Another installed test sends a dead key between two clicks in
+the prompt, a click between two untyped presses and the end of a modal session
+between presses, and checks that neither a double-click nor the popover follows.
+Installed Edit form tests send an untyped key with text, F2, a composition's two
+presses and a popover confirmation to a replaced form and to a form whose model
+takes no prompt, and check that neither form's prompt changes.
+Physical composition, dead keys, candidate-window placement and focus after the
+popover have not been checked on a desktop; they remain under #66.
+
 ## What Blender cannot do (so we do not fake it)
 
 - Text is left, centre or right aligned, never justified.
 - A panel text field is single line; a taller prompt box grows the field, it does not wrap for editing.
 - Dialogs and the sidebar cannot take the composer's custom colours; their layout follows this guide, their palette is the Blender theme's.
+- Input-method composition happens only in Blender's own text fields; the composer opens one rather than faking a pre-edit (see [Composer text input](#composer-text-input)).
 
 ## Prompt approval interaction evidence
 

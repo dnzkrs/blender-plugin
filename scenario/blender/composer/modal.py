@@ -133,6 +133,30 @@ def _edits_text(event, command):
     return bool(event.unicode) and not event.alt
 
 
+def refuse_text(scene, state):
+    """Why text must not reach the prompt now, or None: typed keys, F2 and Blender's text field share it.
+
+    A focused prompt whose form was replaced keeps its focus and its original text until Esc shows the new
+    form. A form whose model takes no prompt also leaves focus.
+    """
+    if state.form_replaced(scene):
+        return cl.FORM_REPLACED_TYPING
+    if not _takes_prompt(scene, state):
+        state.focused = state.dragging = False
+        return cl.NO_PROMPT
+    return None
+
+
+def _refuses_text(operator, context, scene, state):
+    """Report why text cannot be typed into the prompt now; keys stay away from the viewport either way."""
+    reason = refuse_text(scene, state)
+    if reason is None:
+        return False
+    operator.report({"WARNING"}, reason)
+    _redraw(context)
+    return True
+
+
 def _open_dialog(context, scene, state, kind):
     if kind == "model":
         # The model chip opens the search dialog for the form it shows, and the sidebar shows the rest of the
@@ -148,6 +172,67 @@ def _open_dialog(context, scene, state, kind):
         return
     # the tab's settings in a dialog right here (the 3D tab includes its Edit mode form)
     _open_settings(context, state.lane_for(scene))
+
+
+def _open_text_field(operator, context, state):
+    """Open Blender's own text field at the pointer for the focused prompt: input methods compose only there.
+
+    The composer keeps focus underneath; the popover's text is typed at the prompt's caret when it is confirmed.
+    """
+    from .text_field import PANEL
+
+    state.dragging = False
+    state.untyped_press = False
+    try:
+        context.window_manager.scenario_composer_text = ""
+        bpy.ops.wm.call_panel(name=PANEL, keep_open=False)
+    except (RuntimeError, AttributeError) as error:
+        operator.report(
+            {"WARNING"},
+            f"Could not open a text field for the prompt ({error}); use the sidebar's Prompt field",
+        )
+
+
+def _untyped_event(operator, context, state, event):
+    """An event whose type Python cannot name, handled without reading its type again.
+
+    Blender gives input-method composition (Japanese, Chinese, Korean) no Python type and no text, and shows
+    and finishes it only in its own text fields. A composition this prompt cannot read would otherwise stay
+    pending and land in the next native text field that opens (an Outliner rename, say), so a focused
+    prompt hands it to that field. A composition starts with two such presses in a row (its start, then its
+    first update); a dead key sends one, then its release or the key with the accented character, so the
+    field opens on the second press only. A key Blender cannot name that carries text is typed.
+    """
+    if event.value == "PRESS":
+        state.presses.reset()  # a key between two clicks, named or not: no double-click
+    if state.drag_mode is not None:
+        state.untyped_press = False
+        return {"RUNNING_MODAL"}
+    if not state.focused:
+        state.untyped_press = False
+        return {"PASS_THROUGH"}
+    if event.value != "PRESS":
+        state.untyped_press = False  # a key's release: a dead key, never part of a composition
+        return {"RUNNING_MODAL"}
+    if event.unicode:
+        state.untyped_press = False
+        if not (event.ctrl or event.oskey or event.alt) and not _refuses_text(
+            operator, context, context.scene, state
+        ):
+            state.field.insert(event.unicode)
+            state.commit_to_lane(context.scene)
+            _redraw(context)
+        return {"RUNNING_MODAL"}
+    if event.is_repeat:
+        return {"RUNNING_MODAL"}  # a held key: Blender never marks input-method events as repeats
+    if not state.untyped_press:
+        state.untyped_press = True
+        return {"RUNNING_MODAL"}
+    state.untyped_press = False
+    if not _refuses_text(operator, context, context.scene, state):
+        _open_text_field(operator, context, state)
+        _redraw(context)
+    return {"RUNNING_MODAL"}
 
 
 class SCENARIO_OT_composer_modal(bpy.types.Operator):
@@ -185,7 +270,9 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
         runtime.state.composer_modal_running = False
         state = runtime.state.composer
         if state is not None:
+            # the next session starts over: no double-click, no composition run with a press from this one
             state.presses.reset()
+            state.untyped_press = False
             state.hover = None
             state.dragging = False
             if state.drag_mode is not None:
@@ -266,6 +353,11 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
             except RuntimeError as error:
                 state.focused = state.dragging = False
                 self.report({"WARNING"}, str(error))
+        if not event.type:  # read once: each read of a type outside Python's enum logs a warning
+            return _untyped_event(self, context, state, event)
+        if event.value == "PRESS":
+            # a named key or button between two untyped presses: not a composition
+            state.untyped_press = False
         if state.drag_mode is not None:
             if event.type == "MOUSEMOVE":
                 state.mouse = (event.mouse_region_x, event.mouse_region_y)
@@ -411,15 +503,15 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
             _generate(self, scene, state)
             _redraw(context)
             return {"RUNNING_MODAL"}
-        if state.form_replaced(scene) and _edits_text(event, command):
-            # Keep the keys away from the viewport, but never type into the form that replaced it.
-            self.report({"WARNING"}, cl.FORM_REPLACED_TYPING)
+        if _edits_text(event, command) and _refuses_text(self, context, scene, state):
+            # Never type into a form that replaced this prompt's, or one whose model (loaded by another
+            # window or a tool) takes no prompt.
             return {"RUNNING_MODAL"}
-        if _edits_text(event, command) and not _takes_prompt(scene, state):
-            # Another window or a tool loaded a model without a prompt into this form: write nothing.
-            state.focused = state.dragging = False
-            self.report({"WARNING"}, cl.NO_PROMPT)
-            _redraw(context)
+        if event.type == "F2":
+            # like Blender's F2 rename, a native text field (where input methods compose) types into the prompt
+            if not _refuses_text(self, context, scene, state):
+                _open_text_field(self, context, state)
+                _redraw(context)
             return {"RUNNING_MODAL"}
         if event.type == "BACK_SPACE":
             field.backspace()
