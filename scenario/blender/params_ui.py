@@ -6,6 +6,9 @@ from ..core.api.catalog import param_override
 from . import props, runtime
 
 SEP = ","
+# Inputs a text field cannot edit: model and strength lists. LoRAs and compositions are
+# chosen in the picker's Trained chip and written by trained_models.apply_to instead.
+LIST_TYPES = ("model_array", "number_array")
 
 
 def multi_selection(item):
@@ -16,8 +19,19 @@ def set_multi_selection(item, values):
     item.multi_value = SEP.join(str(v) for v in values)
 
 
-def _drawable(spec):
-    return not spec.is_prompt and not spec.is_file
+def _drawable(spec, hidden=()):
+    return (
+        not spec.is_prompt
+        and not spec.is_file
+        and spec.ptype not in LIST_TYPES
+        and spec.name not in hidden
+    )
+
+
+def _hidden(model_id):
+    from . import trained_models
+
+    return trained_models.hidden_inputs(model_id)
 
 
 def _seed(item, name, value):
@@ -35,11 +49,15 @@ def sync_params(lane_state, schema, model_id):
     """Ensure one collection item per drawable spec; keep values whose name, type and model match.
 
     Returns the names whose values were seeded or corrected; removals are not listed.
+    Dropping a value this model's form held, such as a LoRA list an earlier
+    version drew as text, changes the request, so the form is priced again and
+    a price error saved with the file gives way to the current reason.
     """
     keep = {}
     seeded = set()
+    hidden = _hidden(model_id)
     for spec in schema.specs:
-        if not _drawable(spec):
+        if not _drawable(spec, hidden):
             continue
         # Collection removals invalidate cached RNA item references. Resolve each
         # item from the current collection after any preceding removal/addition.
@@ -81,9 +99,20 @@ def sync_params(lane_state, schema, model_id):
                 seeded.add(spec.name)
             if created and not has_default and not spec.required_always:
                 _seed(item, "enabled", False)
+    dropped = False
     for index in range(len(lane_state.params) - 1, -1, -1):
-        if lane_state.params[index].name not in keep:
+        item = lane_state.params[index]
+        if item.name not in keep:
+            if item.model_id == model_id:
+                dropped = True
+                if item.name in hidden:
+                    from . import trained_models
+
+                    # An earlier version drew this LoRA input as text; keep a saved ID visible.
+                    trained_models.adopt_typed(lane_state, item)
             lane_state.params.remove(index)
+    if dropped:
+        props.mark_estimate_dirty(lane_state)
     return seeded
 
 
@@ -136,8 +165,9 @@ def collect_values(lane_state, schema):
     values, enabled = {}, {}
     if schema.prompt_name:
         values[schema.prompt_name] = lane_state.prompt
+    hidden = _hidden(lane_state.model_id)
     for spec in schema.specs:
-        if not _drawable(spec):
+        if not _drawable(spec, hidden):
             continue
         index = lane_state.params.find(spec.name)
         if index < 0:
@@ -170,8 +200,9 @@ def collect_file_refs(lane_state, schema):
 def draw_params(layout, lane_state, schema, exclude=(), locked=()):
     """`locked` names parameters shown greyed out because something else drives them (duration under Match timeline)."""
     groups = {}
+    hidden = _hidden(lane_state.model_id)
     for spec in schema.specs:
-        if not _drawable(spec) or spec.name in exclude:
+        if not _drawable(spec, hidden) or spec.name in exclude:
             continue
         groups.setdefault(spec.group or "Settings", []).append(spec)
     for group, specs in groups.items():

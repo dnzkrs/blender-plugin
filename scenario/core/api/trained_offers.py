@@ -1,0 +1,279 @@
+# SPDX-FileCopyrightText: 2026 Scenario Inc.
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Trained models a generation lane can offer, and how a choice changes its selection (#97).
+
+Pure functions over REST records: no SDK client, network or bpy. A LoRA or
+composition is offered through each base model of the lane whose own detail
+record declares a slot that runs it (see trained_routes). List rows and bulk
+summaries carry no schema, so a base counts only once its details were read;
+callers read those details lazily and in lane order (base_candidates).
+"""
+
+import math
+from dataclasses import dataclass
+
+from . import catalog
+from .trained_routes import ROUTE_STACK, LoraSlot, Pick, _type_text
+
+__all__ = [
+    "DEFAULT_STRENGTH",
+    "MAX_BASE_READS",
+    "Base",
+    "Offer",
+    "Strength",
+    "base_candidates",
+    "concepts",
+    "declared_strength",
+    "lora_bases",
+    "merged",
+    "offers",
+    "picks_from_payload",
+    "runs",
+    "saved_ids",
+    "strength",
+]
+
+# Visible starting strength of a newly chosen LoRA, and of a reset strength field,
+# when the trained model declares none: the Scenario web app's default. It is kept
+# within the base's declared range, and the user sees and can change it before any
+# price; it is never added silently.
+DEFAULT_STRENGTH = 0.75
+# Base model descriptions one lane may read to find LoRA slots, per connection.
+MAX_BASE_READS = 400
+# Strength resolution sent to the service. Blender stores 32-bit floats, so 0.8
+# reads back as 0.800000011920929; rounding keeps equal choices byte-identical.
+STRENGTH_DIGITS = 4
+UNSUPPORTED = "Not available in Blender: no base model runs this type."
+
+
+@dataclass(frozen=True)
+class Strength:
+    """The strength control a LoRA gets on one base: declared bounds and a starting value."""
+
+    minimum: float
+    maximum: float
+    step: float | None
+    initial: float
+
+    def clamp(self, value):
+        return round(min(max(float(value), self.minimum), self.maximum), STRENGTH_DIGITS)
+
+
+def strength(slot, record=None):
+    """The LoRA strength control of a slot, or None when its scale input declares no bounds.
+
+    It starts at the strength the trained `record` declares for itself, otherwise
+    at DEFAULT_STRENGTH, as the Scenario web app does, clamped to the base's
+    declared range. A base's declared default does not change the start; it only
+    fills a strength a request omits (trained_routes.apply).
+    """
+    low, high = slot.scale_min, slot.scale_max
+    if low is None or high is None or low > high:
+        return None
+    declared = declared_strength(record) if record is not None else None
+    initial = DEFAULT_STRENGTH if declared is None else declared
+    initial = min(max(initial, low), high)
+    return Strength(
+        float(low), float(high), slot.scale_step, round(float(initial), STRENGTH_DIGITS)
+    )
+
+
+def runs(slot, record):
+    """(route kind, "") when the slot runs this trained record, else (None, reason).
+
+    A LoRA also needs a strength: declared bounds for a control, or a declared
+    default. Without either, the request could only be refused later.
+    """
+    route, reason = slot.route(record)
+    if route == ROUTE_STACK and strength(slot) is None and slot.scale_default is None:
+        return None, f"{slot.scale_label} declares no strength range."
+    return route, reason
+
+
+@dataclass(frozen=True)
+class Base:
+    """A detailed lane base model and the LoRA slot its schema declares."""
+
+    record: catalog.ModelRecord
+    slot: LoraSlot
+
+    @property
+    def id(self):
+        return self.record.id
+
+
+def lora_bases(lane, records):
+    """Detailed lane models, curated first, whose schema declares a valid LoRA slot.
+
+    Records without details (list rows) and malformed slots are skipped: a
+    changed schema must not offer a route the quote would refuse.
+    """
+    bases = []
+    for record in catalog.models_for_lane(lane, records):
+        if not record.parameters:
+            continue
+        try:
+            slot = LoraSlot.from_record(record.raw)
+        except ValueError:
+            continue
+        if slot is not None:
+            bases.append(Base(record, slot))
+    return bases
+
+
+def base_candidates(lane, records, attempted=(), limit=MAX_BASE_READS):
+    """IDs of lane models whose details are unknown, in lane order, not yet attempted."""
+    skipped = set(attempted)
+    return [
+        record.id
+        for record in catalog.models_for_lane(lane, records)
+        if not record.parameters and record.id not in skipped
+    ][: max(0, int(limit))]
+
+
+@dataclass(frozen=True)
+class Offer:
+    """One trained model in the picker: the bases that run it, or why none does."""
+
+    record: catalog.ModelRecord
+    kind: str
+    bases: tuple
+    reason: str
+
+    @property
+    def id(self):
+        return self.record.id
+
+    @property
+    def available(self):
+        return bool(self.bases)
+
+
+def offers(pairs, bases, *, unknown=""):
+    """Picker rows for (kind, record) pairs, available first, otherwise in listing order.
+
+    Private plain custom models are ordinary runnable models, not LoRAs or
+    compositions, so they are not offered here. Other trained types are listed
+    as unavailable with a reason. `unknown` explains a LoRA or composition no
+    checked base runs while base details are still loading or could not load.
+    """
+    rows = []
+    for kind, record in pairs:
+        if kind == catalog.PRIVATE_CUSTOM:
+            continue
+        if kind not in catalog.USABLE_TRAINED_KINDS:
+            rows.append(Offer(record, kind, (), UNSUPPORTED))
+            continue
+        compatible = tuple(base for base in bases if runs(base.slot, record.raw)[0])
+        reason = ""
+        if not compatible:
+            if record.raw.get("status") != "trained":
+                reason = "This model is not trained and ready to use."
+            elif unknown:
+                reason = unknown
+            else:
+                reason = f"No base model in this form accepts {_type_text(record.raw.get('type'))} models."
+        rows.append(Offer(record, kind, compatible, reason))
+    return sorted(rows, key=lambda offer: not offer.available)
+
+
+def merged(current, choice, *, same_base):
+    """The trained selection after choosing one model, as (model_id, kind, scale) tuples.
+
+    Choosing through another base model, choosing a composition, or choosing a
+    LoRA while a composition is selected replaces the selection: a composition
+    runs alone. Choosing a LoRA already selected changes its strength in place;
+    another LoRA is added after the current ones.
+    """
+    model_id, kind, _scale = choice
+    current = list(current) if same_base else []
+    if kind == catalog.TRAINED_COMPOSITION or any(
+        item[1] == catalog.TRAINED_COMPOSITION for item in current
+    ):
+        return [tuple(choice)]
+    for index, item in enumerate(current):
+        if item[0] == model_id:
+            current[index] = tuple(choice)
+            return current
+    return [*current, tuple(choice)]
+
+
+def concepts(record):
+    """(model_id, scale) pairs a composition record lists, malformed entries skipped."""
+    raw = record.raw if isinstance(record, catalog.ModelRecord) else record
+    values = raw.get("concepts") if isinstance(raw, dict) else None
+    pairs = []
+    for concept in values if isinstance(values, list) else ():
+        if isinstance(concept, dict) and isinstance(concept.get("modelId"), str):
+            scale = concept.get("scale")
+            pairs.append(
+                (
+                    concept["modelId"],
+                    scale
+                    if isinstance(scale, (int, float)) and not isinstance(scale, bool)
+                    else None,
+                )
+            )
+    return pairs
+
+
+def declared_strength(record):
+    """The strength a trained model declares for itself, or None.
+
+    That is the scale of the first entry of its concepts, when the record
+    carries one: a published LoRA lists itself there with its strength.
+    """
+    pairs = concepts(record)
+    scale = pairs[0][1] if pairs else None
+    if scale is None or not math.isfinite(scale):
+        return None
+    return float(scale)
+
+
+def picks_from_payload(slot, payload):
+    """Picks a saved payload names in this slot: one composition, or LoRAs with their strengths.
+
+    Returns () when the payload names none, or values this slot cannot describe
+    (misaligned strengths, a model ID and a stack together).
+    """
+    if not isinstance(payload, dict):
+        return ()
+    component = slot.component
+    composition = payload.get(component.model_id_input) if component.model_id_input else None
+    loras = payload.get(component.model_input)
+    scales = payload.get(component.scale_input)
+    if isinstance(composition, str) and composition:
+        return () if loras else (Pick(composition),)
+    if not isinstance(loras, list) or not loras:
+        return ()
+    if any(not isinstance(item, str) or not item for item in loras):
+        return ()
+    if scales is None:
+        return tuple(Pick(item) for item in loras)
+    if (
+        not isinstance(scales, list)
+        or len(scales) != len(loras)
+        or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in scales)
+    ):
+        return ()
+    return tuple(Pick(item, float(value)) for item, value in zip(loras, scales, strict=True))
+
+
+def saved_ids(raw, payload):
+    """Model IDs a saved payload holds in the LoRA inputs a base record names, read leniently.
+
+    Unlike picks_from_payload, this needs no valid slot: a restore can still
+    count the trained models of a job whose base's LoRA inputs changed since.
+    """
+    ui = raw.get("uiConfig") if isinstance(raw, dict) else None
+    component = ui.get("lorasComponent") if isinstance(ui, dict) else None
+    if not isinstance(component, dict) or not isinstance(payload, dict):
+        return []
+    ids = []
+    for key in ("modelIdInput", "modelInput"):
+        name = component.get(key)
+        value = payload.get(name) if isinstance(name, str) and name else None
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, str) and item and item not in ids:
+                ids.append(item)
+    return ids

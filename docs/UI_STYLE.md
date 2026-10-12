@@ -139,6 +139,77 @@ or in the composer note unless this session recorded it. With online access disa
 needing the description, such as `model_schema`, reports a recorded failure once
 while it starts the next read.
 
+### Trained models in the picker
+
+The Image tab's last chip, **Trained**, lists LoRAs and compositions instead of
+base models ([#97](https://github.com/scenario-labs/blender-plugin/issues/97)):
+the selected connection's private trained models first, then public Scenario
+LoRAs and compositions. Other chips and the base lanes never list them. Each row
+says how the model runs in the form the choice lands in (Image, or Render Image
+when the picker opened from it), for example **Private LoRA via FLUX.1 Dev**. A
+model no checked base runs stays readable but greyed, with its reason: the base
+models are still being checked, no base in this form accepts its type, it is not
+trained yet, or Blender has no route for its type (**Not available in Blender**).
+Private plain custom models are not listed here.
+
+Base-model descriptions declare the LoRA inputs, so they are read only when the
+Trained chip opens: in lane order, once per connection, with a progress line and
+the reason when reading stops. A catalog refresh never starts these reads, and
+neither does a trained list that arrives after the dialog closed on this chip.
+Descriptions a stopped scan never reached are read the next time the chip opens;
+only a refresh lets a later Trained chip retry the ones that failed. The open
+dialog is refreshed as descriptions arrive, through the same popup refresh as
+Studio. Its list shows ten rows, fewer when the window is too short for the whole
+dialog at the current UI scale, so OK and Cancel stay on screen.
+
+The highlighted model's box shows its kind, **Runs with** for a single base or a
+**Run with** choice among several (the form's current base when it runs the model,
+otherwise **Choose a base model**; OK refuses until one is chosen), and for a LoRA
+a **Strength** field bounded by the base's declared range. As in the Scenario web
+app, it starts at the LoRA's own strength (the scale of the first entry of its
+concepts, when its record carries one), otherwise at 0.75, clamped to that range;
+Reset to Default Value returns the field to that start. A base's declared default
+does not move the start. The chosen base and strength stay while base
+descriptions keep arriving and the rows are rebuilt; another row or a new dialog
+starts again from the form, and a new dialog highlights the form's first trained
+model. A composition shows how many LoRAs it combines with their own strengths. One line
+states the effect on the form: adding to the LoRAs already chosen, changing this
+LoRA's strength, or replacing the form's trained models. Choosing through another
+base, choosing a composition, or choosing a LoRA over a composition replaces the
+form's choice; that line says so before OK. The whole new choice is checked against
+the base's current schema before the form changes, and then the price is
+invalidated. The box ends with **Experimental: LoRAs and compositions not
+accepted**. Drawing reads this state only.
+
+The persistent **Model** row lists the form's choice under the model button, for
+example **Studio LoRA (strength 0.8)** or **Name (composition)**, each with a
+remove button that reprices the form, followed by the same experimental line. The
+base's LoRA inputs are never drawn as text fields. Every request writes the choice
+into the base's declared inputs with the same route function local MCP and the
+quote check use; a base change, a model no longer listed, a choice saved under
+another connection or project, or a route the current schema refuses keeps the
+choice and blocks the price with its reason. An ID that an earlier version saved
+in the base's model text field (such as **LoRA or Composition Model**) becomes the
+form's choice when it has none, so it is neither dropped silently nor sent
+unchecked; it gets the same checks and remove button. Dropping any value an
+earlier version saved in an input the form no longer draws, such as the LoRA
+lists it drew as text, prices the form again, so a price error saved with the
+file gives way to the current reason.
+**Reload parameters** restores the job's LoRAs or composition that are still
+listed, never adds a strength the job did not send (the base's declared default
+applies, otherwise the price asks for one) and warns about the trained models it
+could not restore. Before the trained list has loaded (still loading, or its read
+failed), it keeps every model the base's LoRA inputs describe, unchecked, says
+they are checked once the list loads, and the price waits with the list's reason.
+Until then the Model row shows each by its ID: the job's composition, from the
+base's model ID input, as a composition without a strength, and its LoRAs with
+the strengths they ran with. When the list arrives, the models it names get
+their listed kind and name (a composition sends no strength) and the form is
+priced again; one it does not name stays and
+blocks the price with its reason until it is removed. Strength editing in the
+sidebar and Studio, project defaults and the composer chip label are follow-up
+work.
+
 ## Duration and Match timeline
 
 The video model's `Duration (cost)` drives the camera-path duration for **Render
