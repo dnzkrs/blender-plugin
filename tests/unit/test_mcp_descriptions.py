@@ -125,6 +125,7 @@ def test_real_tool_descriptions_are_complete_static_contracts(module):
         assert re.fullmatch(r"[a-z][a-z0-9_]*", name)
         assert len(description) >= 120, name
         assert all(label in description for label in ("Args:", "Returns:", "Example:")), name
+        assert description.count("Returns:") == 1, name  # One complete return contract.
         assert re.search(
             r"\n(?:Platform equivalent: [^\n]+|No platform equivalent)\.$", description
         )
@@ -198,7 +199,7 @@ def test_list_models_reports_the_picker_status():
 def test_list_generations_names_every_history_kind_including_unknown():
     _, calls = specs("tools_scenario")
     description = {call.args[0].value: call.args[1].value for call in calls}["list_generations"]
-    assert "kind (image, video, 3d, material, audio or unknown)" in description
+    assert "kind (image, video, 3d, material, audio, workflow or unknown)" in description
 
 
 def test_job_tools_advertise_both_reference_spellings_without_requiring_legacy_id():
