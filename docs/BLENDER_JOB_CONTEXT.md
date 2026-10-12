@@ -148,6 +148,22 @@ copies it to another approved destination without rendering. Handles, receipts
 and progress are session-local; no job store, blend property or restart replay
 is added.
 
+`JobSession.film_export` is the session-owned `FilmExportCommands` behind the
+[native and MCP export controls](FILM_PLAN.md#native-and-mcp-video-export-controls).
+Inspection captures each review scene's origin after synchronizing its own view
+layers; preparation captures the selected recipe scene's origin and binds both
+with the resolved destination. Approval rechecks both origins in Object Mode,
+rereads the review scene's shown bounds, snapshots on the main thread and calls
+`export_film`. Both synchronizations run inside `JobSession.synchronizing`: a
+window evaluates only the scenes it shows, so an unshown review scene can hold
+tags from changes elsewhere, such as a datablock removal, and their evaluation
+must not revoke its origin. Other scenes and other updates still revoke origins.
+Runtime maintenance drains the export task and delivers it with
+`deliver_local_export`, never through a scene callback. A frame, recipe or object
+change, Undo/Redo or scene reselection invalidates a ready export, while a running
+export keeps its snapshot. Shutdown closes the handles, removing their private
+staging, only once the export thread has stopped.
+
 ## Film media preparation ownership
 
 `JobSession.prepare_film_composition` captures the supplied current origin and
@@ -313,7 +329,17 @@ of whether the unevaluated depsgraph lists updates. Catalog loads fill and
 restore generation forms without RNA update callbacks, so they do not cause such
 an update; see [catalog delivery](architecture/runtime.md#active-sdk-catalog).
 Undo/redo and file loading
-invalidate captured state too. Every main-thread scene callback and reaper tick
+invalidate captured state too. The one exception is
+`JobSession.synchronizing(scenes)`, which a main-thread caller opens while it
+evaluates those scenes' own view layers: a scene that no window shows keeps tags
+from changes elsewhere until such an update, which then reports a change although
+its data is unchanged. Inside the block, main-thread dependency and frame updates
+to a named scene revoke none of that scene's origins. Origins share one revision
+per scene (`OriginRevisions`), so this keeps every origin captured in it,
+including origins other features captured, not only the caller's; callers
+recheck the content they approved instead. Other scenes, updates outside the
+block, deleted scenes and targets, render-thread callbacks, Undo/Redo and file
+loading still invalidate. Every main-thread scene callback and reaper tick
 prunes removed captured scenes and deleted object wrappers, including when a surviving
 scene has no dependency updates. Deleted targets invalidate the scenes that captured
 them and their registry entries are dropped; live targets in other scenes retain

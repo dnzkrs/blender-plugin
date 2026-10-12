@@ -573,8 +573,9 @@ active UI/MCP do not yet install or quote these drafts. The session quote comman
 below preserves source/scene/scope identity through price preparation and dispatch;
 active controls must retain the original recipe review and require explicit
 generation approval. Verified media preparation is available through the session
-command below. Native review assembly has [separate controls](#native-and-mcp-review-controls);
-video export, live provider acceptance and human motion/audio review remain
+command below. Native review assembly and video export have separate
+[review](#native-and-mcp-review-controls) and [export](#native-and-mcp-video-export-controls)
+controls; live provider acceptance and human motion/audio review remain
 separate. These helpers alone do not complete
 Film finishing.
 
@@ -655,7 +656,8 @@ unchanged, and API keys need no discovered/default project identifier.
 
 This command is verified through the installed native session and offline SDK
 fixtures. The controls below expose this path without installing or modifying
-the recipe. Provider acceptance and video export remain separate work.
+the recipe. Provider acceptance remains separate work; review scenes export
+through the [video export controls](#native-and-mcp-video-export-controls).
 
 ## Native and MCP composition controls
 
@@ -703,8 +705,9 @@ source/recipe/scene invalidation, cancellation, uncertainty, lost acknowledgemen
 read-only drawing and saved-master discovery after reopening the owner. Synthetic
 desktop mouse/keyboard, focus, confirmation and viewport checks pass on macOS
 arm64 Blender 5.1.2; see [the exact ZIP evidence](UI_STYLE.md#film-composition-controls).
-Live provider/media acceptance, other OS/DPI behavior and video export remain
-pending; local review assembly uses the [review controls](#native-and-mcp-review-controls).
+Live provider/media acceptance and other OS/DPI behavior remain pending; local
+review assembly and video export use the [review](#native-and-mcp-review-controls)
+and [export](#native-and-mcp-video-export-controls) controls.
 These controls do not complete the Film or release acceptance gates.
 
 ## Native saved-media review primitive
@@ -933,9 +936,9 @@ the build operator's Undo-only options. The tests call the Undo/Redo handler
 directly rather than stepping Blender's undo history, and evaluate the dependency
 graph explicitly where a window would after a click or build.
 Physical desktop interaction, live provider media, other OS/DPI behavior and human
-motion/audio review remain pending. Review scenes have no native/MCP video export
-control yet; the [offline export primitive](#offline-film-video-export-primitive)
-below is a session command only.
+motion/audio review remain pending. Built review scenes export to video through
+the [export controls](#native-and-mcp-video-export-controls) over the
+[offline video export primitive](#offline-film-video-export-primitive) below.
 
 ## Offline Film video export primitive
 
@@ -948,14 +951,18 @@ rounding each side down to the even size H.264 needs) and
 whether any sound strip is audible: not muted itself, by its sequencer channel or
 by an enclosing meta strip or that strip's channel. It synchronizes
 that scene's own view layers before `libraries.write`, which avoids the Blender
-5.2 copy crash seen for new inactive scenes. A second synchronization is a no-op,
-so a caller can synchronize, capture origins and then snapshot without
-invalidating them. Every distinct external movie, sound, image and font file is
-stamped once by path, size, modification time, device and inode, so the media
-budget counts files rather than strips; packed sounds and fonts travel in the
-snapshot. The working file, selected scene and frame are
-unchanged. Bounds are validated before any file is written, and a failed snapshot
-removes its new `film-export-*` staging directory.
+5.2 copy crash seen for new inactive scenes. A second synchronization with nothing
+in between is a no-op. A window evaluates only the scenes it shows, though, so a
+scene no window shows keeps depsgraph tags from changes elsewhere (removing any
+datablock requests a relations rebuild of every depsgraph) until the next
+synchronization, which then reports an update although its data is unchanged.
+Callers therefore synchronize inside `JobSession.synchronizing`, which does not
+let that evaluation revoke the scene's origins. Every distinct external movie,
+sound, image and font file is stamped once by path, size, modification time,
+device and inode, so the media budget counts files rather than strips; packed
+sounds and fonts travel in the snapshot. The working file, selected scene and
+frame are unchanged. Bounds are validated before any file is written, and a
+failed snapshot removes its new `film-export-*` staging directory.
 
 [`local_export`](../scenario/core/jobs/local_export.py) is the bpy-free export
 primitive. A specification allows at most fifteen minutes of frames (900 seconds
@@ -1090,16 +1097,123 @@ owned until the reaper releases it without waiting on it at any earlier tick,
 session refusal of a foreign Blender or worker
 and of relative, private, existing and non-portable destinations before any work.
 A build without an H.264 or AAC
-encoder is not exercised. Native/MCP export controls, the Studio case-study
-bundle, human playback review and Windows/Linux desktop evidence remain separate.
-Export makes no Scenario request, spends nothing and writes no job record.
+encoder is not exercised. The [native/MCP export controls](#native-and-mcp-video-export-controls)
+call these session commands; the Studio case-study bundle, human playback review
+and Windows/Linux desktop evidence remain separate. Export makes no Scenario
+request, spends nothing and writes no job record.
+
+## Native and MCP video export controls
+
+**Film > Export** follows **Review** in the sidebar and on Studio's Film
+**Review** page. **Export video...** lists the local review scenes built for the
+current production and unchanged recipe: scenes tagged as a downloaded final or
+previs review whose production ID and recipe digest match. Timeline, foreign,
+changed-recipe and library scenes are excluded. Inspection synchronizes each
+candidate's own view layers, as the snapshot later does, and captures its origin;
+neither synchronization counts as an edit of that scene.
+Blender's file browser then opens at `<Output Folder>/Film`, which this explicit
+action creates when missing, with a portable suggested name
+`<Title> - <Mode> Review.mp4`, numbered when that file already exists. Its side
+panel lists the review scenes with frames, rate, size (the snapshot's default:
+Blender's truncated output size rounded down to even), media count, audible sound
+strips and any blocking reason: no strips, a rate that is not an integer from 1 to
+120, more than fifteen minutes, scene, clip or mask strips, missing media or the
+media budget. **Audio** matches the sound strips by default, or always includes or
+omits an AAC track; **Use review scene size** can be turned off for explicit even
+dimensions. A scene size outside 64 to 4096 pixels is not a blocking reason: the
+browser opens with that option off and the nearest bounded size, and preparing
+that scene size, natively or through MCP without both dimensions, is refused
+with the size and a request for an explicit one. Confirming the file browser
+validates the destination with the session policy and prepares a READY export;
+nothing renders.
+
+**Render video** is a separate confirmation. It repeats the review scene, frames,
+rate, duration, size, audio track and media count, wraps the full resolved
+destination and names the verification that will run (installed `ffprobe`, else
+Blender's weaker decode check). Confirming approves that exact destination once.
+The command requires Object Mode, the selected recipe scene, both captured
+origins and an absent destination. It rereads the review scene's frames, rate,
+size, strip and media counts, audible sound strips and blocking reason shown when
+preparing, refusing any change, then writes the private snapshot and starts the
+session-owned export thread. A different destination string, an agent
+approval of a destination outside the Output Folder, Edit Mode or another running
+export refuses without consuming the approval; once those checks pass, the
+approval is consumed even if the export cannot start. The panel shows
+the media check, rendered frames and percentage, verification and saving;
+runtime maintenance advances and redraws it while the panel is closed.
+**Cancel export** stops the child, the destination stays absent and the private
+files remain until discarded.
+
+An EXPORTED handle shows the file name, **Open folder** and **Copy SHA-256**; its
+status adds the size, SHA-256 and verification used. When rendering and
+verification succeed but saving fails, the handle keeps the verified private
+video: **Choose new file...** selects another new file and **Save video copy**
+confirms that exact file, copying without rendering again. **Error details** shows
+the complete path-free error. **Discard export** (or **Discard private files**
+after an export) deletes only the private snapshot, staged video and logs; an
+exported video stays where it was saved.
+
+A READY export binds the recipe scene's and the review scene's captured origins.
+A frame change, object selection or edit, an Undo or Redo, or leaving either scene
+and selecting it again, including viewing the review scene, turns it into ERROR,
+as does the destination appearing meanwhile; prepare again. Blender evaluates a
+review scene that no window shows only when something updates it explicitly, such
+as the export's own synchronizations. Their evaluation cannot tell tags from
+changes elsewhere apart from an edit, so it does not revoke the origin: an edit
+made to that scene without showing it, for example from a script, is caught only
+by the approval's reread of what preparation showed. Once rendering starts, later edits do not stop it, because the snapshot
+and media stamps bind the bytes. Session retirement (credential or project
+change, file load or extension disable) cancels a running export; shutdown
+removes every handle's private staging once the export thread has stopped.
+`JobSession.film_export` (`FilmExportCommands`) keeps at most eight session-local
+handles, one open export per review scene and one export or copy running at a
+time. A full set retires only finished handles that own no private files.
+Handles add no executor, store, service client or persisted state; restart drops
+them, and the exported file is the durable artifact.
+
+Local MCP uses `film_export_sources(production_id)` for the context, sources,
+`default_directory` (`<Output Folder>/Film`), encoder availability and expected
+verification. `prepare_film_export` takes that context, the production, a
+`source_id` and an absolute new `destination_path`, with optional even
+width/height and `include_audio`. Agent destinations must resolve inside the
+configured Output Folder after following links, compared part by part without
+folding case or Unicode composition, although Windows resolution returns an
+existing folder's on-disk spelling. Only the missing default Film folder, with a
+missing Output Folder above it, may be created. Show the
+returned destination and settings for approval, then call
+`render_film_export(review_id, approved_destination)` with that destination
+verbatim, like an exact cost. Poll `film_export_review`; it also cancels,
+discards, and after a failed save uses `prepare_republish` for a new Output
+Folder destination, then `republish` with the returned `pending_destination`
+verbatim. Native file browser choices are limited only by the session policy
+above. Native and MCP controls share the same handles, but agent render and
+copy approvals recheck the Output Folder: an agent cannot approve a file chosen
+natively elsewhere, which stays for native confirmation. See
+[MCP export commands](MCP.md#film-export-commands).
+
+Installed synthetic tests cover inspection filters and blocking reasons, the
+even default size at a 33% resolution scale, the native file browser and Render
+dialogs (including dismissal, numbered names, explicit audio and size choices),
+destination refusals (existing, relative, wrong
+suffix, non-portable, private storage, outside the Output Folder or through a
+link), agent approval refusal for native exports and copies outside the Output
+Folder, exact-destination approval, MCP/native handle sharing, cached progress,
+cancellation without a destination, a failed save followed by a copy-only native
+re-publish, READY invalidation by a frame change, object selection or a new
+destination file, an export surviving a later edit, read-only panel and Studio
+drawing, Edit Mode gating, retirement, shutdown cleanup and the handle bound. One
+real child export of a 128 by 72 review is verified by Blender's decode check;
+the other tests replace the child with a fast handoff while the real publish
+runs. Physical desktop interaction, screenshots, other OS/DPI behavior, human
+playback review and live provider media remain pending. This MP4 export does not
+replace the Studio case-study bundle.
 
 ## Remaining integration and evidence
 
-Mixed-rate normalization, provider-specific preparation, native/MCP export
-controls for review scenes and the Studio case-study bundle remain separate work.
-Keep useful source capabilities and tests as those paths are connected; do not
-describe this helper adoption as a completed Film workflow.
+Mixed-rate normalization, provider-specific preparation and the Studio
+case-study bundle remain separate work. Keep useful
+source capabilities and tests as those paths are connected; do not describe this
+helper adoption as a completed Film workflow.
 
 [Shared Film job tests](../tests/unit/test_film_jobs.py) cover atomic competing
 reservations, committed-but-unacknowledged writes, uncertain submissions, scope

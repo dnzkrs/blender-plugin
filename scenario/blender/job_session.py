@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from weakref import WeakKeyDictionary, WeakValueDictionary
@@ -212,6 +213,7 @@ class JobSession:
         self._completion_limit = completion_limit
         self._origins = OriginRevisions()
         self._scenes = {}
+        self._synchronizing = ()
         self._targets = {}
         self._target_scenes = {}
         self._pending = []
@@ -264,6 +266,9 @@ class JobSession:
         from .film_review_commands import FilmReviewCommands
 
         self.film_review = FilmReviewCommands(self, store)
+        from .film_export import FilmExportCommands
+
+        self.film_export = FilmExportCommands(self)
         from .asset_organization import AssetOrganization
 
         self.asset_organization = AssetOrganization(self)
@@ -1708,8 +1713,36 @@ class JobSession:
                     self._origins.invalidate(scene_id)
                 del self._targets[target_id]
 
+    @contextmanager
+    def synchronizing(self, scenes):
+        """Keep every origin of these scenes while the caller evaluates their own view layers.
+
+        A window evaluates only the scenes it shows. Any other scene keeps pending
+        depsgraph tags, such as the relations rebuild that removing any datablock
+        requests, until something updates it explicitly, and that update reports a
+        change even when the scene's data is unchanged. Such tags cannot be told
+        apart from an edit made without showing the scene, so callers recheck the
+        content they approved instead.
+
+        Inside the block, main-thread dependency and frame updates to a named scene
+        revoke none of that scene's origins. Origins share one revision per scene
+        (``OriginRevisions``), so this keeps every origin captured in it, including
+        origins other features captured, not only the caller's. Other scenes,
+        updates outside the block, deleted scenes and targets, render-thread
+        callbacks, Undo/Redo and file loading still revoke origins.
+        """
+        _main_thread()
+        previous = self._synchronizing
+        self._synchronizing = (*previous, *scenes)
+        try:
+            yield
+        finally:
+            self._synchronizing = previous
+
     def invalidate_scene(self, scene):
         _main_thread()
+        if any(item is scene for item in self._synchronizing):
+            return
         for scene_id, existing in self._scenes.items():
             if existing is scene:
                 self._origins.invalidate(scene_id)
@@ -1766,6 +1799,8 @@ class JobSession:
                 self.film_timeline.close()
                 self.film_capture.close()
                 self.film_review.close()
+                # The export thread has stopped, so its private staging can be removed.
+                self.film_export.close()
                 if self._coordinator.film_review_cleanup_pending:
                     self._film_cleanup_retry_at = time.monotonic() + 5.0
                 else:
