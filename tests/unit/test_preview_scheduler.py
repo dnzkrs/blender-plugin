@@ -15,7 +15,7 @@ from scenario.core.audio_waveform import EnvelopeBuilder, WaveformCanceled, Wave
 from scenario.core.jobs import preview_scheduler, transfers
 from scenario.core.jobs import result_previews as previews
 from scenario.core.jobs.coordinator import RemoteSnapshot
-from scenario.core.jobs.preview_scheduler import NO_WAVEFORM, ResultPreviewScheduler
+from scenario.core.jobs.preview_scheduler import CANCELED, NO_WAVEFORM, ResultPreviewScheduler
 from scenario.core.jobs.store import JobIntent, JobState
 from scenario.core.jobs.transfers import ResultDownloader
 from scenario.core.jobs.workers import JobWorkers, WorkerError
@@ -891,3 +891,264 @@ def test_retry_keeps_an_envelope_whose_offline_decode_is_running(decoding):
     drive(scheduler)
     assert state(lane, "asset-sound", ENVELOPE).state == State.READY
     assert len(lane.decoder.calls) == 1
+
+
+def test_an_envelope_only_request_never_polls_the_server_still(decoding):
+    lane = decoding
+    service, scheduler = lane.env, lane.scheduler
+    ready_job(service, "request", [("asset-sound", "audio/wav", wav())])
+    service.assets["asset-sound"] = asset_record(
+        "asset-sound", "audio/wav", thumbnail=f"{CDN}/sound.png"
+    )
+    (status,) = scheduler.request("request", renditions=(ENVELOPE,))
+    assert status.get(ENVELOPE).state == State.QUEUED and status.get(STILL) is None
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).state == State.READY
+    assert state(lane, "asset-sound") is None
+    assert service.calls == [] and service.downloader.calls == []
+    # A later full request adds the still, which polls Scenario like any other.
+    scheduler.request("request")
+    drive(scheduler)
+    assert state(lane, "asset-sound").state != State.QUEUED and len(service.calls) == 1
+    for invalid in ((), ("thumbnail",)):
+        with pytest.raises(previews.PreviewError, match="renditions"):
+            scheduler.request("request", renditions=invalid)
+
+
+def test_cancel_discards_an_issued_envelope_copy_and_retry_decodes(decoding, monkeypatch):
+    lane = decoding
+    service, scheduler, workers = lane.env, lane.scheduler, lane.workers
+    ready_job(service, "request", [("asset-sound", "audio/wav", wav())])
+    refusals = []
+
+    def refuse(*args, **kwargs):
+        refusals.append(args)
+        raise WorkerError("Preview queue is full; wait before adding more previews")
+
+    original = workers.decode_result_preview
+    monkeypatch.setattr(workers, "decode_result_preview", refuse)
+    scheduler.request("request", renditions=(ENVELOPE,))
+    drive(scheduler)
+    assert refusals and state(lane, "asset-sound", ENVELOPE).state == State.DECODE
+    canceled = scheduler.cancel("request", "asset-sound").get(ENVELOPE)
+    assert canceled.state == State.FAILED and canceled.reason == CANCELED
+    drive(scheduler)
+    assert work_directories(service) == [] and lane.decoder.calls == []
+    assert state(lane, "asset-sound", ENVELOPE).reason == CANCELED
+    monkeypatch.setattr(workers, "decode_result_preview", original)
+    scheduler.retry("request", "asset-sound")
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).state == State.READY
+    assert len(lane.decoder.calls) == 1
+    assert scheduler.cancel("request", "unknown") is None
+
+
+def test_cancel_in_a_failed_batch_backoff_keeps_the_envelope_from_decoding(decoding, monkeypatch):
+    # A lane batch that failed leaves the envelope pending its next poll; a
+    # Cancel in that backoff must stop it, so that poll never queues a decode.
+    lane = decoding
+    service, scheduler = lane.env, lane.scheduler
+    ready_job(service, "request", [("asset-sound", "audio/wav", wav())])
+    original, failures = service.coordinator.prepare_result_previews, []
+
+    def fail_once(*args, **kwargs):
+        if not failures:
+            failures.append(args)
+            raise OSError("fixture lane failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(service.coordinator, "prepare_result_previews", fail_once)
+    scheduler.request("request", renditions=(ENVELOPE,))
+    drive(scheduler)
+    pending = state(lane, "asset-sound", ENVELOPE)
+    assert failures and pending.state == State.PENDING and "retrying" in pending.reason
+    canceled = scheduler.cancel("request", "asset-sound").get(ENVELOPE)
+    assert canceled.state == State.FAILED and canceled.reason == CANCELED
+    lane.clock.now += 60
+    drive(scheduler)
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).reason == CANCELED
+    assert lane.decoder.calls == [] and work_directories(service) == []
+    # Only an explicit retry decodes it again.
+    scheduler.retry("request", "asset-sound")
+    drive(scheduler)
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).state == State.READY
+    assert len(lane.decoder.calls) == 1
+
+
+def test_cancel_terminates_a_running_offline_decode(decoding):
+    lane = decoding
+    service, scheduler = lane.env, lane.scheduler
+    ready_job(service, "request", [("asset-sound", "audio/wav", wav())])
+    entered, signaled = threading.Event(), threading.Event()
+
+    def gate(cancel):
+        entered.set()
+        assert cancel.wait(5), "Cancel did not signal the running decode"
+        signaled.set()
+        raise WaveformCanceled("Waveform preview canceled")
+
+    lane.decoder.gate = gate
+    scheduler.request("request", renditions=(ENVELOPE,))
+    scheduler.pump()
+    futures.wait([scheduler._task._future], timeout=5)
+    scheduler.pump()
+    assert entered.wait(5)
+    assert scheduler.cancel("request", "asset-sound").get(ENVELOPE).reason == CANCELED
+    assert signaled.wait(5)
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).reason == CANCELED
+    assert work_directories(service) == [] and scheduler.decode_requests() == ()
+
+
+def test_retry_right_after_cancel_decodes_again_once_the_child_stops(decoding):
+    lane = decoding
+    service, scheduler = lane.env, lane.scheduler
+    ready_job(service, "request", [("asset-sound", "audio/wav", wav())])
+    entered, release = threading.Event(), threading.Event()
+
+    def gate(cancel):
+        if len(lane.decoder.calls) == 1:
+            entered.set()
+            assert cancel.wait(5) and release.wait(5)
+            raise WaveformCanceled("Waveform preview canceled")
+
+    lane.decoder.gate = gate
+    scheduler.request("request", renditions=(ENVELOPE,))
+    scheduler.pump()
+    futures.wait([scheduler._task._future], timeout=5)
+    scheduler.pump()
+    assert entered.wait(5)
+    scheduler.cancel("request", "asset-sound")
+    # The canceled child has not stopped yet; Retry still queues a new decode.
+    assert scheduler.retry("request", "asset-sound").get(ENVELOPE).state == State.QUEUED
+    release.set()
+    drive(scheduler)
+    drive(scheduler)
+    ready = state(lane, "asset-sound", ENVELOPE)
+    assert ready.state == State.READY and len(lane.decoder.calls) == 2
+    assert work_directories(service) == [] and scheduler._canceled == set()
+
+
+def test_cancel_during_an_inflight_copy_discards_it_when_the_batch_returns(decoding):
+    lane = decoding
+    service, scheduler = lane.env, lane.scheduler
+    ready_job(
+        service, "request", [("asset-video", "video/mp4", MP4), ("asset-sound", "audio/wav", wav())]
+    )
+    service.assets["asset-video"] = asset_record("asset-video", "video/mp4")
+    entered, release = _gated(service)
+    scheduler.request("request")
+    scheduler.pump()
+    assert entered.wait(2)  # The batch has copied the audio and now reads metadata.
+    canceled = scheduler.cancel("request", "asset-sound")
+    assert canceled.get(ENVELOPE).state == State.FAILED
+    assert canceled.get(STILL).state == State.QUEUED  # Server stills keep polling.
+    release.set()
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).reason == CANCELED
+    assert lane.decoder.calls == [] and work_directories(service) == []
+    assert scheduler.decode_requests() == ()
+    scheduler.retry("request", "asset-sound")
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).state == State.READY
+
+
+def test_retry_after_cancel_while_a_still_poll_is_in_flight_reads_queued(decoding):
+    # The Waveform control retries a canceled envelope and reads the status
+    # right away; a still poll for the same result may be on the lane then.
+    lane = decoding
+    service, scheduler = lane.env, lane.scheduler
+    ready_job(service, "request", [("asset-sound", "audio/wav", wav())])
+    service.assets["asset-sound"] = asset_record("asset-sound", "audio/wav")  # No still yet.
+    scheduler.request("request")
+    scheduler.cancel("request", "asset-sound")
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).reason == CANCELED
+    assert state(lane, "asset-sound").state == State.PENDING
+    entered, release = _gated(service)
+    lane.clock.now += 60
+    scheduler.pump()
+    assert entered.wait(2)  # The still's next metadata read is in flight.
+    assert scheduler.retry("request", "asset-sound").get(ENVELOPE).state == State.QUEUED
+    assert state(lane, "asset-sound", ENVELOPE).state == State.QUEUED
+    release.set()
+    futures.wait([scheduler._task._future], timeout=5)
+    scheduler.pump()
+    # The returned poll is applied and the retry follows in the same pump.
+    assert state(lane, "asset-sound", ENVELOPE).state in (State.QUEUED, State.DECODE)
+    service.gate = None
+    drive(scheduler)
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).state == State.READY
+    assert len(lane.decoder.calls) == 1 and work_directories(service) == []
+
+
+def test_cancel_after_a_retry_waiting_for_a_still_poll_keeps_the_envelope_canceled(decoding):
+    # Waveform Retry, then Cancel, while a still poll for the same result is on
+    # the lane: the retry waits for that poll, and its restart must not queue
+    # the envelope that the later cancel stopped.
+    lane = decoding
+    service, scheduler = lane.env, lane.scheduler
+    ready_job(service, "request", [("asset-sound", "audio/wav", wav())])
+    service.assets["asset-sound"] = asset_record("asset-sound", "audio/wav")  # No still yet.
+    scheduler.request("request")
+    scheduler.cancel("request", "asset-sound")
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).reason == CANCELED
+    entered, release = _gated(service)
+    lane.clock.now += 60
+    scheduler.pump()
+    assert entered.wait(2)  # The still's next metadata read is in flight.
+    assert scheduler.retry("request", "asset-sound").get(ENVELOPE).state == State.QUEUED
+    canceled = scheduler.cancel("request", "asset-sound")
+    assert canceled.get(ENVELOPE).reason == CANCELED
+    assert canceled.get(STILL).state == State.QUEUED  # The still keeps the retry.
+    release.set()
+    futures.wait([scheduler._task._future], timeout=5)
+    scheduler.pump()
+    # The returned poll is applied and the retry restarts the still only.
+    assert state(lane, "asset-sound", ENVELOPE).reason == CANCELED
+    assert state(lane, "asset-sound").state == State.QUEUED
+    polls = len(service.calls)
+    service.gate = None
+    drive(scheduler)
+    drive(scheduler)
+    assert len(service.calls) > polls  # The still was polled again at once.
+    assert state(lane, "asset-sound", ENVELOPE).reason == CANCELED
+    assert lane.decoder.calls == [] and work_directories(service) == []
+    # Only a retry after the cancel decodes again.
+    scheduler.retry("request", "asset-sound")
+    drive(scheduler)
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).state == State.READY
+    assert len(lane.decoder.calls) == 1 and work_directories(service) == []
+
+
+def test_a_retry_after_that_cancel_decodes_even_when_the_batch_brought_a_copy(decoding):
+    # Retry, Cancel, then Retry again while the batch that copies the audio is
+    # on the lane: the last retry wins over the cancel before it.
+    lane = decoding
+    service, scheduler = lane.env, lane.scheduler
+    ready_job(
+        service, "request", [("asset-video", "video/mp4", MP4), ("asset-sound", "audio/wav", wav())]
+    )
+    service.assets["asset-video"] = asset_record("asset-video", "video/mp4")
+    entered, release = _gated(service)
+    scheduler.request("request")
+    scheduler.pump()
+    assert entered.wait(2)  # The batch has copied the audio and now reads metadata.
+    scheduler.retry("request", "asset-sound")
+    assert scheduler.cancel("request", "asset-sound").get(ENVELOPE).reason == CANCELED
+    assert scheduler.retry("request", "asset-sound").get(ENVELOPE).state == State.QUEUED
+    release.set()
+    futures.wait([scheduler._task._future], timeout=5)
+    scheduler.pump()
+    # The canceled batch's copy is discarded, and the last retry queues a new one.
+    assert state(lane, "asset-sound", ENVELOPE).state in (State.QUEUED, State.DECODE)
+    service.gate = None
+    drive(scheduler)
+    drive(scheduler)
+    assert state(lane, "asset-sound", ENVELOPE).state == State.READY
+    assert len(lane.decoder.calls) == 1 and work_directories(service) == []

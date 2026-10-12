@@ -12,6 +12,7 @@ import threading
 import time
 import wave
 import zlib
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -136,8 +137,9 @@ def asset_record(asset_id, media_type, *, thumbnail=None, preview=None):
     return record
 
 
-@pytest.fixture
-def env(tmp_path):
+@contextmanager
+def preview_env(tmp_path):
+    """An offline store, coordinator and fake downloader; other test modules reuse it."""
     store = JobStore(tmp_path / "jobs.sqlite3", SCOPE)
     results = tmp_path / "results"
     cache = tmp_path / "previews"
@@ -169,20 +171,27 @@ def env(tmp_path):
             return httpx.Response(200, json={"asset": state.assets[name]})
         pytest.fail(f"Unexpected preview request {request.method} {request.url.path}")
 
-    adapter = SDKAdapter(
+    with SDKAdapter(
         Credentials("key", "secret"),
         online=lambda: state.online,
         base_url=SCOPE.service,
         account_id=SCOPE.account_id,
         project_id=SCOPE.project_id,
         transport=httpx.MockTransport(respond),
-    )
-    downloader = FakeDownloader()
-    coordinator = JobCoordinator(adapter, store, result_root=results, result_downloader=downloader)
-    state.store, state.coordinator, state.downloader = store, coordinator, downloader
-    state.cache, state.results = cache, results
-    yield state
-    adapter.close()
+    ) as adapter:
+        downloader = FakeDownloader()
+        coordinator = JobCoordinator(
+            adapter, store, result_root=results, result_downloader=downloader
+        )
+        state.store, state.coordinator, state.downloader = store, coordinator, downloader
+        state.cache, state.results = cache, results
+        yield state
+
+
+@pytest.fixture
+def env(tmp_path):
+    with preview_env(tmp_path) as state:
+        yield state
 
 
 def ready_job(env, request_id, assets):

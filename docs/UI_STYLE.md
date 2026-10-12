@@ -709,6 +709,71 @@ were unchanged. This is desktop interaction evidence, not human listening,
 paid provider acceptance, other OS desktop coverage or resolution of #263.
 Native exact-ZIP tests separately decode synthetic MP4, WebM, MP3, WAV and OGG.
 
+## Saved media playback and waveform
+
+Each downloaded saved video or audio result gets one row of saved-job
+descriptors: **Play video (N)** with **Play in Blender (N)**, or **Play audio
+(N)** with **Waveform (N)**. Numbering counts every saved asset, like **Add
+video/audio strip (N)**. Jobs, Generations and the Studio pages that reuse them
+draw the same row from the same descriptors. These controls are read-only: they
+generate, download, apply and spend nothing and leave the scene unchanged, so
+they open no confirmation, and their tooltips say so. They are not job actions:
+MCP `job_status` does not list them, and no MCP tool launches a player. Play
+reports through the status line once the private copy opens or fails, and is
+unavailable in background Blender.
+
+The waveform box follows the job's controls: a `SOUND` header naming the result,
+with a close button, then status text wrapped to the box, **Cancel** while
+loading, the waveform icon when ready and **Retry** after an error or
+cancellation. Blender clips a label wider than its row, and its interface font
+is proportional, so status text wraps by the width Blender's interface font
+measures at the widget text size, not by a character count. The available width
+is the drawn region's less the panel, box and icon space of the sidebar layout.
+In Studio it is the width Studio requests for its popup: Blender lays a popup
+out before it sizes the popup's region, which is 0 px wide on that first draw,
+and a popup's context region is the header that opened it. Lines break only at
+ordinary spaces, never after a hyphen in a word that fits: a value keeps its
+unit ("1.00 s", "44.1 kHz") and a wrapped line ends with its `·` separator. A
+word wider than the whole line splits after its last hyphen that fits, else
+after its last character that fits. Text and icon size use
+`preferences.system.ui_scale` (1 when background Blender reports 0), never the
+pixel size times the resolution scale, which would count that scale twice.
+Drawing reads only the controller's cached state: no file, store or session
+access, decode or property write. The icon is built in the controller's timer,
+outside drawing.
+
+Installed exact-ZIP tests on Blender 5.1.2 macOS arm64 cover the descriptor
+rows and their operators, recording-layout draws with file and store reads
+refused, the UI-scale sizing, measured wrapping in a 561 px sidebar at an
+interface scale of 2 (UI scale 1.0 on a Retina display), in a sized popup and
+in Studio's first draw before its popup is sized, the Jobs panel drawing the
+box, and an offline waveform decoded by the real child Blender.
+
+Two private physical desktop passes on Blender 5.1.2 macOS arm64 at UI scale
+1.0, with system mouse and key events and a ZIP built before the measured
+wrapping, showed the rows in the sidebar Jobs panel and on the Studio Jobs page.
+**Play video** opened the system player; **Play in Blender** opened Blender's
+animation player, which Escape closed with Blender's window frontmost again; and
+**Waveform** went from its loading lines to the summary and envelope icon. A
+screenshot from the second pass sets the waveform text inset. A third pass, on
+a ZIP with the measured wrapping but before its later Studio popup width and
+hyphen amendments, drew the sidebar rows at UI scales 1.0 and 2.0, with a
+1122 px sidebar at 2.0. **Waveform** reached its summary and envelope icon at
+both scales; the loading lines wrapped inside the box, and the summary kept
+"1.00 s" whole and ended its first line with a `·` separator. The wrapped lines
+started at the box's left edge rather than under the first line's text. All
+three passes predate the credential-free system player launch: **Play video**
+then went through Blender's `wm.path_open`, which runs the same macOS `open`
+command with Blender's whole environment. A later private check with
+Environment credentials and a ZIP with that launch confirmed that **Play video**
+opened the system player on the private read-only copy, whose SHA-256 matched
+the saved result, and that **Play in Blender** started a player whose
+environment had no `SCENARIO_`, `PYTHON` or proxy names. Play
+audio, the waveform's Cancel, Retry and close on the desktop, clicking **Play
+video** or **Play in Blender** at UI scale 2.0, Studio at UI scale 2.0, viewport
+interaction, other platforms and human listening are not yet recorded; they
+remain #189 and #68 acceptance.
+
 ## Saved static model confirmation
 
 Show one import control for each supported GLB result, labelled as in
