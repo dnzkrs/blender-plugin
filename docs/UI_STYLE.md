@@ -422,6 +422,62 @@ the pairing rule itself. Physical double-clicks on Blender 5.1.2 macOS selected
 nothing and reset nothing before this change; a physical recheck remains
 under #66.
 
+### Errors and file loads
+
+The composer's modal operator runs one session at a time. A pointer move over
+the composer starts one, and so does a pointer move anywhere in a 3D viewport
+while the prompt is focused. The session lasts until a click outside the
+composer, or until the pointer leaves it while the prompt is unfocused. A
+refused Generate, such as a failed poll or an error report from the submission,
+is reported as a warning and the session goes on. If handling any other event
+raises, whether a click, a key, a pointer move or a drag, the composer ends its
+session and Blender reports the error. So does an error that F2 or a
+composition's second press raises while opening the
+[native text field](#composer-text-input), unless it is a `RuntimeError` or an
+`AttributeError`, which that call reports as a warning. The composer leaves a
+focused prompt and marks no session as running, so the next pointer move over
+it starts a new session. Blender can also end a session without an event,
+because its window closed or a file loaded. The operator's cancel callback then
+ends it the same way: it leaves a focused prompt, stops a selection drag, puts a
+dragged composer back where the press found it and marks no session as running,
+so no 3D view keeps drawing a caret that types nothing. Either way, as at every
+session end, the composer forgets a pending click and an untyped press: the next
+session's first click completes no [double-click](#double-click) and its first
+untyped press starts a new composition run. It also gives the window its own
+cursor back when a drag, or the pointer resting on the resize corner, had set
+one, so no resize cursor stays over the viewport. Every file load (Open, Revert,
+File > New) also collapses the card to the pill, leaves the prompt and restores
+the saved placement through the composer's load handler, which persists across
+loads.
+
+A physical Blender 5.1.2 macOS check found the composer frozen for the rest of
+the session after one Generate refused by the GUI spend guard: clicks on it fell
+through to the viewport, and a file load did not help because Blender had
+dropped the non-persistent load handler at the first load. Generate refusals
+became warnings in a later change. Installed tests on the packaged ZIP now send
+the modal a Generate refused by the spend guard's poll and an error raised while
+a key is typed in the focused prompt. They call the cancel callback during a
+placement drag and during a selection drag in the focused prompt, and run three
+file loads in a row. The error, cancel and file-load tests fail on the previous
+composer. Another test raises from the text field call on a composition's
+second press and on F2. A session-end test ends a session by an error and by
+the cancel callback, after a click and after an untyped press. Without the error
+handling, the text field test fails and so does the session-end test's error
+case; when a session end keeps the pending click and the untyped press, both of
+its cases fail. A cursor test ends a session the same two ways while the pointer
+rests on the resize corner; when a session end restores the cursor only after a
+drag, both of its cases fail with the resize cursor still set. The tests call
+the operator's handlers directly in background Blender, which cannot start the
+modal itself: there, an `INVOKE_DEFAULT` call of a modal operator is refused
+before `invoke` runs, even with a window, area and region override. No event-simulated GUI check (`--enable-event-simulate`) has run for
+this change, because it was prepared without opening a Blender window. Blender's
+window manager has therefore not yet been seen dropping the handler after an
+error, calling cancel on a file load or a closed window, or keeping the load
+handler across File > Revert in an interface session. The
+[#66 follow-up](https://github.com/scenario-labs/blender-plugin/issues/66#issuecomment-6120385854)
+lists those event-simulated checks and the physical rechecks, with their
+expected results.
+
 ## Composer text input
 
 The composer prompt is custom drawing fed by key events. Blender composes

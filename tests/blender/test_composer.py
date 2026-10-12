@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import contextlib
 import json
+import os
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -101,6 +102,24 @@ class ComposerStateTests(unittest.TestCase):
         state.sync_from_lane(scene)
         self.assertIsNone(state.field.selection)
         self.assertEqual(state.field.caret, len("from panel"))
+
+
+class ComposerFileLoadTests(unittest.TestCase):
+    def test_every_file_load_resets_the_composer(self):
+        # Blender drops a load_pre handler that is not persistent at the first file load it runs for.
+        composer = submodule("blender.composer")
+        runtime = submodule("blender.runtime")
+        for _load in range(3):
+            state = runtime.state.composer
+            state.expanded = state.focused = True
+            state.field.set_text("left from the previous file")
+            runtime.state.composer_modal_running = True
+            reset_scene()  # File > New, Open and Revert run the same load handlers
+            self.assertIn(composer._load_pre, bpy.app.handlers.load_pre)
+            self.assertIs(runtime.state.composer, state)
+            self.assertFalse(state.expanded or state.focused)
+            self.assertEqual(state.field.text, "")
+            self.assertFalse(runtime.state.composer_modal_running)
 
 
 class ComposerDrawHelpersTests(unittest.TestCase):
@@ -1157,6 +1176,275 @@ class ComposerSideRegionTests(unittest.TestCase):
         self.assertEqual(result, {"RUNNING_MODAL"})
         self.assertEqual(state.offset, (0.0, 0.0))
         save.assert_called_once_with()
+
+    # -- handler lifetime ------------------------------------------------------
+    def _session(self, prompt="a red kettle"):
+        """An expanded card on the Image form, its layout and a context that can start the modal."""
+        scene = bpy.context.scene
+        scene.scenario.lane = "image"
+        scene.scenario.lane_state("image").prompt = prompt
+        ctx = self._context(sidebar=False)
+        ctx.window_manager = SimpleNamespace(modal_handler_add=mock.Mock())
+        state = self.state_mod.ComposerState()
+        state.expanded = True
+        state.sync_from_lane(scene)
+        return ctx, state, self.modal._layout(ctx, state)
+
+    def _invoke(self, operator, context, point):
+        """The pointer moving over `point`: the key map starts the composer's modal there."""
+        event = SimpleNamespace(type="MOUSEMOVE", value="NOTHING")
+        event.mouse_region_x, event.mouse_region_y = point
+        return self.modal.SCENARIO_OT_composer_modal.invoke(operator, context, event)
+
+    def test_a_refused_generate_keeps_the_composer_usable(self):
+        # The physical repro: with the GUI spend guard, Generate's poll refuses and bpy.ops raises.
+        ctx, state, layout = self._session()
+        generate = self._centre(layout.generate_rect)
+        with (
+            mock.patch.object(self.runtime.state, "composer", state),
+            mock.patch.object(self.runtime.state, "composer_modal_running", False),
+            mock.patch.object(self.modal.panels, "generate_enabled", return_value=True),
+            mock.patch.object(self.modal, "_caret_index", return_value=0),
+            mock.patch.dict(os.environ, {"SCENARIO_GUI_PROBE": "1"}),
+        ):
+            operator = self._operator()
+            self.assertEqual(self._invoke(operator, ctx, generate), {"RUNNING_MODAL"})
+            self.assertEqual(self._clicks(operator, ctx, generate, (10.0,))[0], {"RUNNING_MODAL"})
+            operator.report.assert_called_once()
+            self.assertEqual(operator.report.call_args.args[0], {"WARNING"})
+            # the same handler keeps the composer: the next click focuses the prompt
+            self.assertTrue(self.runtime.state.composer_modal_running)
+            self._clicks(operator, ctx, self._centre(layout.prompt_rect), (20.0,))
+            self.assertTrue(state.focused)
+
+    def test_an_error_while_handling_input_releases_the_composer(self):
+        # Blender ends a modal handler whose modal() raises without calling it again: the composer must not
+        # stay marked as running, or every later session is refused and clicks fall through to the viewport.
+        ctx, state, layout = self._session()
+        prompt = self._centre(layout.prompt_rect)
+        failure = ValueError("simulated failure")
+        with (
+            mock.patch.object(self.runtime.state, "composer", state),
+            mock.patch.object(self.runtime.state, "composer_modal_running", False),
+            mock.patch.object(self.modal, "_caret_index", return_value=0),
+        ):
+            operator = self._operator()
+            self.assertEqual(self._invoke(operator, ctx, prompt), {"RUNNING_MODAL"})
+            self._clicks(operator, ctx, prompt, (10.0,))
+            self.assertTrue(state.focused)
+            with (
+                mock.patch.object(self.modal.panels, "form_takes_prompt", side_effect=failure),
+                self.assertRaises(ValueError) as raised,
+            ):
+                self._event(operator, ctx, "A", "PRESS", prompt, unicode="a")
+            self.assertIs(raised.exception, failure)  # Blender still reports the error
+            self.assertFalse(self.runtime.state.composer_modal_running)
+            # no caret is left drawn in a prompt whose keys now reach the viewport
+            self.assertFalse(state.focused or state.dragging)
+            self.assertEqual(self.scene_prompt(), "a red kettle")
+            # the next pointer move over the composer starts a new session that takes the click
+            self.assertEqual(self._invoke(operator, ctx, prompt), {"RUNNING_MODAL"})
+            self.assertTrue(self.runtime.state.composer_modal_running)
+            self._clicks(operator, ctx, prompt, (20.0,))
+            self.assertTrue(state.focused)
+
+    def test_a_handler_blender_removes_releases_the_composer(self):
+        # A closed window or a loaded file removes the handler and calls the operator's cancel(), not modal().
+        ctx, state, layout = self._session()
+        saved = state.offset
+        grab, _kind = self._grab_point(layout)
+        with (
+            mock.patch.object(self.runtime.state, "composer", state),
+            mock.patch.object(self.runtime.state, "composer_modal_running", False),
+        ):
+            operator = self._operator()
+            self.assertEqual(self._invoke(operator, ctx, grab), {"RUNNING_MODAL"})
+            self._event(operator, ctx, "LEFTMOUSE", "PRESS", grab)
+            self.assertIsNotNone(state.drag_mode)
+            self.modal.SCENARIO_OT_composer_modal.cancel(operator, ctx)
+            self.assertFalse(self.runtime.state.composer_modal_running)
+            self.assertIsNone(state.drag_mode)
+            self.assertEqual(state.offset, saved)
+            self.assertEqual(self._invoke(operator, ctx, grab), {"RUNNING_MODAL"})
+
+    def test_a_handler_blender_removes_leaves_a_focused_prompt(self):
+        # After a closed window, keys reach the viewport until a pointer move starts a new session: no 3D view
+        # may keep drawing a caret in a prompt that types nothing, as after an error.
+        ctx, state, layout = self._session()
+        prompt = self._centre(layout.prompt_rect)
+        card = layout.card_rect
+        above = (card.x + card.w / 2, card.top + 40 * layout.scale)
+        self.assertIsNone(layout.hit(*above))
+        with (
+            mock.patch.object(self.runtime.state, "composer", state),
+            mock.patch.object(self.runtime.state, "composer_modal_running", False),
+            mock.patch.object(self.modal, "_caret_index", return_value=0),
+        ):
+            operator = self._operator()
+            self.assertEqual(self._invoke(operator, ctx, prompt), {"RUNNING_MODAL"})
+            # a press in the prompt focuses it and starts a selection drag that is still held
+            self._event(operator, ctx, "LEFTMOUSE", "PRESS", prompt)
+            self.assertTrue(state.focused and state.dragging)
+            self.modal.SCENARIO_OT_composer_modal.cancel(operator, ctx)
+            self.assertFalse(self.runtime.state.composer_modal_running)
+            self.assertFalse(state.focused or state.dragging)
+            self.assertEqual(self.scene_prompt(), "a red kettle")
+            # a pointer move elsewhere in the viewport no longer resumes typing; one over the composer starts
+            # a new session that takes the click
+            self.assertEqual(self._invoke(operator, ctx, above), {"PASS_THROUGH", "CANCELLED"})
+            self.assertEqual(self._invoke(operator, ctx, prompt), {"RUNNING_MODAL"})
+            self._clicks(operator, ctx, prompt, (20.0,))
+            self.assertTrue(state.focused)
+
+    def test_an_error_opening_the_text_field_releases_the_composer(self):
+        # A composition's second press and F2 open Blender's text field from the same handler: an error there
+        # ends the session as any other does, and the composer stays usable.
+        ctx, state, layout = self._session()
+        ctx.window_manager.scenario_composer_text = ""  # the popover opens empty
+        prompt = self._centre(layout.prompt_rect)
+        # not a RuntimeError or an AttributeError, which the text field reports as a warning
+        failure = TypeError("simulated failure")
+        call_panel = mock.Mock(side_effect=failure)
+        ops = SimpleNamespace(wm=SimpleNamespace(call_panel=call_panel))
+        with (
+            mock.patch.object(self.runtime.state, "composer", state),
+            mock.patch.object(self.runtime.state, "composer_modal_running", False),
+            mock.patch.object(self.modal, "_caret_index", return_value=0),
+            mock.patch.object(self.modal, "bpy", SimpleNamespace(ops=ops)),
+        ):
+            operator = self._operator()
+            for when, keys in ((10.0, ("", "")), (20.0, ("F2",))):
+                with self.subTest(keys=keys):
+                    call_panel.reset_mock()
+                    self.assertEqual(self._invoke(operator, ctx, prompt), {"RUNNING_MODAL"})
+                    self._clicks(operator, ctx, prompt, (when,))
+                    self.assertTrue(state.focused)
+                    for key in keys[:-1]:
+                        self.assertEqual(
+                            self._event(operator, ctx, key, "PRESS", prompt), {"RUNNING_MODAL"}
+                        )
+                    with self.assertRaises(TypeError) as raised:
+                        self._event(operator, ctx, keys[-1], "PRESS", prompt)
+                    self.assertIs(raised.exception, failure)  # Blender still reports the error
+                    call_panel.assert_called_once()
+                    self.assertFalse(self.runtime.state.composer_modal_running)
+                    self.assertFalse(state.focused or state.dragging or state.untyped_press)
+                    self.assertEqual(self.scene_prompt(), "a red kettle")
+            # the next pointer move over the composer starts a new session that takes the click
+            self.assertEqual(self._invoke(operator, ctx, prompt), {"RUNNING_MODAL"})
+            self._clicks(operator, ctx, prompt, (30.0,))
+            self.assertTrue(state.focused)
+        operator.report.assert_not_called()
+
+    def test_an_ended_session_forgets_its_pending_click_and_untyped_press(self):
+        # A press pairs with the next one into a double-click, and an untyped press with the next one into a
+        # composition, only within one session: a session ended by an error or by Blender starts both over.
+        quick = self._double_click_seconds() / 2
+        failure = ValueError("simulated failure")
+        for end in ("error", "cancel"):
+            with self.subTest(end=end):
+                ctx, state, _layout = self._session(prompt="hello world")
+                ctx.window_manager.scenario_composer_text = ""
+                point, index = self._word_point(ctx, state)
+                call_panel = mock.Mock(return_value={"INTERFACE"})
+                ops = SimpleNamespace(wm=SimpleNamespace(call_panel=call_panel))
+                with (
+                    mock.patch.object(self.runtime.state, "composer", state),
+                    mock.patch.object(self.runtime.state, "composer_modal_running", False),
+                    mock.patch.object(self.modal, "bpy", SimpleNamespace(ops=ops)),
+                ):
+                    operator = self._operator()
+
+                    def end_session(operator=operator, ctx=ctx, point=point, end=end):
+                        if end == "cancel":  # a closed window or a loaded file
+                            self.modal.SCENARIO_OT_composer_modal.cancel(operator, ctx)
+                            return
+                        # an error before the event's type is read, here while laying out a pointer move
+                        with (
+                            mock.patch.object(self.modal, "_layout", side_effect=failure),
+                            self.assertRaises(ValueError),
+                        ):
+                            self._event(operator, ctx, "MOUSEMOVE", "NOTHING", point)
+
+                    self.assertEqual(self._invoke(operator, ctx, point), {"RUNNING_MODAL"})
+                    self._clicks(operator, ctx, point, (10.0,))
+                    self.assertTrue(state.focused)
+                    end_session()
+                    self.assertFalse(self.runtime.state.composer_modal_running)
+                    self.assertIsNone(state.presses.last)
+                    # the next session's first click places the caret: it completes no double-click
+                    self.assertEqual(self._invoke(operator, ctx, point), {"RUNNING_MODAL"})
+                    self._clicks(operator, ctx, point, (10.0 + quick,))
+                    self.assertTrue(state.focused)
+                    self.assertIsNone(state.field.selection)
+                    self.assertEqual(state.field.caret, index)
+                    # the first press of a composition, then the session ends: the run starts over
+                    self.assertEqual(
+                        self._event(operator, ctx, "", "PRESS", point), {"RUNNING_MODAL"}
+                    )
+                    self.assertTrue(state.untyped_press)
+                    end_session()
+                    self.assertFalse(self.runtime.state.composer_modal_running)
+                    self.assertFalse(state.untyped_press or state.focused)
+                    call_panel.assert_not_called()
+                    operator.report.assert_not_called()
+                self.assertEqual(self.scene_prompt(), "hello world")
+
+    def test_an_ended_session_restores_the_resize_cursor(self):
+        # The pointer resting on the resize corner, before any press, shows a resize cursor. A session ended
+        # there by an error or by Blender gives the window its own cursor back: the next session starts with no
+        # hover, so its pointer moves would never restore it.
+        failure = ValueError("simulated failure")
+        for end in ("error", "cancel"):
+            with self.subTest(end=end):
+                ctx, state, layout = self._session()
+                ctx.window = self._cursor_window()
+                corner = self._centre(layout.resize_rect)
+                prompt = self._centre(layout.prompt_rect)
+                self.assertEqual(layout.hit(*corner), ("resize",))
+                with (
+                    mock.patch.object(self.runtime.state, "composer", state),
+                    mock.patch.object(self.runtime.state, "composer_modal_running", False),
+                ):
+                    operator = self._operator()
+                    self.assertEqual(self._invoke(operator, ctx, corner), {"RUNNING_MODAL"})
+                    self.assertEqual(
+                        self._event(operator, ctx, "MOUSEMOVE", "NOTHING", corner), {"PASS_THROUGH"}
+                    )
+                    self.assertEqual(ctx.window.cursor, "MOVE_X")
+                    self.assertIsNone(state.drag_mode)  # a hover, not a resize
+                    if end == "cancel":  # a closed window or a loaded file
+                        self.modal.SCENARIO_OT_composer_modal.cancel(operator, ctx)
+                    else:  # an error while laying out the next pointer move
+                        with (
+                            mock.patch.object(self.modal, "_layout", side_effect=failure),
+                            self.assertRaises(ValueError),
+                        ):
+                            self._event(operator, ctx, "MOUSEMOVE", "NOTHING", corner)
+                    self.assertFalse(self.runtime.state.composer_modal_running)
+                    self.assertIsNone(state.hover)
+                    self.assertIsNone(ctx.window.cursor)
+                    # the next session shows the resize cursor only on the corner again
+                    self.assertEqual(self._invoke(operator, ctx, prompt), {"RUNNING_MODAL"})
+                    self._event(operator, ctx, "MOUSEMOVE", "NOTHING", prompt)
+                    self.assertIsNone(ctx.window.cursor)
+                    self._event(operator, ctx, "MOUSEMOVE", "NOTHING", corner)
+                    self.assertEqual(ctx.window.cursor, "MOVE_X")
+                    self._event(operator, ctx, "MOUSEMOVE", "NOTHING", prompt)
+                    self.assertIsNone(ctx.window.cursor)
+                    operator.report.assert_not_called()
+
+    @staticmethod
+    def _cursor_window():
+        """A window showing the modal cursor last set, or its own (None) once restored, as Blender's does."""
+        window = SimpleNamespace(cursor=None)
+        window.cursor_modal_set = lambda name: setattr(window, "cursor", name)
+        window.cursor_modal_restore = lambda: setattr(window, "cursor", None)
+        return window
+
+    @staticmethod
+    def scene_prompt():
+        return bpy.context.scene.scenario.lane_state("image").prompt
 
     # -- drag helpers ----------------------------------------------------------
     @staticmethod

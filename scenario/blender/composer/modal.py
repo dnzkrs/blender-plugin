@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Modal operator that owns the mouse and keyboard while the pointer is on the composer or the prompt has focus."""
 
+import functools
 import time
 
 import bpy
@@ -235,6 +236,36 @@ def _untyped_event(operator, context, state, event):
     return {"RUNNING_MODAL"}
 
 
+def _leave_prompt():
+    """Leave a focused prompt when the session ends without the event that would normally end it.
+
+    Keys reach the viewport until the pointer moves again over a 3D view and starts a new session, so the
+    prompt loses focus rather than every 3D view drawing a caret that types nothing. Every edit was already
+    committed to its form as it was typed."""
+    state = runtime.state.composer
+    if state is not None:
+        state.focused = False
+
+
+def _ends_session_on_error(handle):
+    """End the composer's session when its event handler raises, then let Blender report the error.
+
+    Blender drops a modal handler whose modal() raises without calling it again. Without this, the composer
+    would stay marked as running: every later session would be refused and clicks on the composer would fall
+    through to the viewport until the next file load."""
+
+    @functools.wraps(handle)
+    def modal(self, context, event):
+        try:
+            return handle(self, context, event)
+        except Exception:
+            _leave_prompt()
+            self._finish(context)
+            raise
+
+    return modal
+
+
 class SCENARIO_OT_composer_modal(bpy.types.Operator):
     bl_idname = "scenario.composer_modal"
     bl_label = "Scenario composer"
@@ -270,6 +301,9 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
         runtime.state.composer_modal_running = False
         state = runtime.state.composer
         if state is not None:
+            # A drag, or the pointer resting on the resize corner, may have set the window's cursor. The next
+            # session starts with no hover and would never restore it: give the window its own cursor back.
+            restore_cursor = state.drag_mode is not None or state.hover == ("resize",)
             # the next session starts over: no double-click, no composition run with a press from this one
             state.presses.reset()
             state.untyped_press = False
@@ -277,9 +311,15 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
             state.dragging = False
             if state.drag_mode is not None:
                 state.cancel_drag()
+            if restore_cursor:
                 _cursor(context, None)
         _redraw(context)
         return {"FINISHED"}
+
+    def cancel(self, context):
+        """Blender removed the handler without calling modal() again: its window closed or a file loaded."""
+        _leave_prompt()
+        self._finish(context)
 
     # -- placement drags -------------------------------------------------------
     def _drag_move(self, context, state, event):
@@ -339,6 +379,7 @@ class SCENARIO_OT_composer_modal(bpy.types.Operator):
             _open_settings(context, state.lane_for(scene))
         _redraw(context)
 
+    @_ends_session_on_error
     def modal(self, context, event):
         state = runtime.state.composer
         if state is None or context.region is None:
