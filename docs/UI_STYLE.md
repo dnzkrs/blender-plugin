@@ -1749,7 +1749,8 @@ discarded. The [desktop regression checks](#studio-and-library-desktop-regressio
 record the earlier scoped input evidence for this behavior.
 
 This view exposes existing creation/Film/result controls and the workflow form
-below, plus Library browsing and model-reference reuse. Interactive workflow
+below, plus Library browsing, model-reference reuse and reviewed
+[collection and tag organization](#library-organization). Interactive workflow
 nodes and complete retained Studio acceptance remain separate.
 
 ### Workflow controls
@@ -1810,14 +1811,116 @@ known file inputs respect their kind and capacity. Confirmation checks the
 unchanged destination, adds a scoped asset reference and invalidates its price.
 The dialog displays a captured scene name, so deleting the scene while it is
 open cannot break redraw; confirmation still rejects the unavailable destination.
-Drawing never starts requests or mutates RNA. Organization writes are separate
-work. Dynamic input choices are retained by the live dialog and resolved through
+Drawing never starts requests or mutates RNA. Collection and tag changes use the
+separate reviewed [Organize](#library-organization) dialog. Dynamic input choices are retained by the live dialog and resolved through
 its RNA properties; Blender passes `OperatorProperties` to the enum callback,
 not the Python operator carrying the prepared approvals. Installed tests exercise
 that registered callback as well as state and command boundaries. The desktop
 checks below record native browsing and reference confirmation for their named
 candidate. Remaining desktop acceptance stays under #66/#68 separately from
 review readiness.
+
+### Library organization
+
+**Load collections** reads one page of 50 collections in the selected connection,
+and **More** appends the next page, up to 200 loaded collections. Each loaded
+collection shows its name, asset count and **Browse**, which sets Collection ID,
+clears Search and Public assets and reads the first page. Each asset row adds a
+tags line and a membership line. Labels that do not fit end with a "+N" count;
+memberships name loaded collections and count the others. These are explicit
+operator reads held by the Library view; drawing never starts one.
+
+A read never disables the control that started it: Refresh, Previous, Next,
+**Load collections**, **More** and **Browse** stay enabled while their read runs,
+a loading line shows it and a second click is refused with a message. Previous,
+Next and More still follow page availability. Blender 5.0 and 5.1 keep a hovered
+button's disabled look across popup refreshes until the pointer leaves it (5.2
+refreshes it), so a control disabled by its own read still looked unavailable
+after the read finished, although the pump had refreshed the popup.
+
+**Organize** on an asset row opens a dialog (width 480) showing the captured
+asset name and the selected project label, as on the Connection page. Choose
+Add to collection, Remove from collection, Add tags, Remove tags or New collection
+and add. The collection dropdown lists the loaded collections, plus the browsed
+Collection ID, and preselects the browsed one. Before collections are loaded,
+Add and Remove ask to load them first. Once a load finds none, the dropdown reads
+**No collections yet** and the dialog says the connection has no collections:
+Add suggests New collection and add, Remove says there is nothing to remove. Its
+choices are retained by the live dialog and resolved through its RNA properties,
+like the reference input menu. Tags are one comma-separated field; surrounding
+spaces are removed and text is otherwise kept exactly, so tags cannot contain
+commas. The dialog states that changes are immediate account metadata, use no
+credits and are not reversed by Blender Undo, and explains invalid text before OK. OK only prepares a review:
+the shared session owner reads the asset's current tags and memberships, and
+nothing is sent. Cancel prepares nothing.
+
+The Library page then shows one review card under the organized asset's row.
+The rows above it keep their place, so the card opens next to the Organize
+button that was chosen, even far down a scrolled page; Blender's popup scrolling
+cannot be moved from Python. A line under Previous and Next names the asset and
+points down to the card, for example after Studio is reopened at the top. On a
+page without that asset, such as another page or a browsed collection, the card
+is drawn in that line's place instead. The status bar confirmation is often hidden behind
+Studio, so it only repeats where the card is. While preparing it says nothing has
+been sent. A ready card lists the asset's current and resulting state, the number
+of requests Apply sends and the 10-minute expiry, with **Apply** and **Discard**.
+Apply is accepted only for that ready card, once; it sends each write once with
+no retry, then the card shows the read-back result: Verified, Refused with the
+HTTP status, Unconfirmed, Not sent or Not verified. When another client added the
+asset first, the service refuses the add as a whole; the read-back shows the
+asset as a member, so nothing more is sent and the card shows Verified with a
+note that it was already in the collection. An unconfirmed card says to
+refresh and inspect; nothing is resent automatically. A finished, refused,
+unchanged, unsent or expired card offers **Dismiss**. Rows take the tags and memberships Scenario
+read back. A row that left the browsed collection stays marked "No longer in this
+collection; refresh" until the next Refresh rather than disappearing. A verified
+new collection joins the loaded collections, even when 200 are already loaded,
+so **Browse** and the dropdown offer it. A page or collection read that was
+already running when the read-back arrived may have listed the state before the
+write, so its rows keep the read-back and the new collection stays listed; the
+next read shows what Scenario lists.
+
+Organize is disabled for pages loaded with Public assets, while a Library page is
+loading and while a change applies. Preparing another review discards a card that
+is not applying. The card belongs to the application's job session, not to the
+popup: the maintenance pump advances it, so closing and reopening Studio during
+Apply keeps it. A credential, Project ID or file change retires the session,
+clears the view and discards its reviews; a write already sent keeps its effect.
+Native and [local MCP](MCP.md#asset-organization) reviews share the same owner,
+so only one change applies at a time and they share its 32-review bound. While
+an agent's change applies, a ready card says so; Apply stays offered but refuses
+with that reason and sends nothing. When unapplied agent reviews fill the bound,
+Organize says so and prepares nothing; unapplied reviews expire after 10 minutes.
+A full bound evicts only settled reviews, which never change again, so a settled
+card keeps its outcome until dismissed even after an agent's new review evicts
+the review behind it.
+
+Installed tests cover operator registration, the dynamic collection enum with
+`OperatorProperties`, read-only drawing, public and busy pages, dialog cancel,
+Apply gating and single use, row updates, an asset added elsewhere before Apply
+(one request, Verified), filtered-row refresh marks, a new
+collection joining a list at the load bound, the card across Studio redraws
+during Apply, connection and file retirement, sanitized refusals, online access
+off, a review bound filled by agent reviews, a finished card kept after an agent's
+review evicts it, Apply while an agent's change applies, a page or collection read
+still running when a change is verified, and narrow-width wrapping. They also
+cover the card under the organized row and on top of a page without it, the
+controls that start a read staying enabled while it runs with repeated clicks
+refused, and the dialog text after a load finds no collections. These tests check
+what is drawn; Blender's hover state needs a desktop.
+
+A physical macOS 27 arm64, Blender 5.1.2 pass on an earlier candidate, at UI
+scales 1 and 2 and in a 1018 by 671 point window, made service reads only. Dialog
+focus, Unicode tags, Escape, Cancel and outside clicks, Discard and Dismiss without
+requests, and viewport shortcuts afterwards worked. Japanese IME composition does
+not start in the dialog's native text field, as in Blender's own fields. It found
+the card out of view after OK on a lower row, Refresh and Load collections drawn
+disabled after their reads until the pointer moved, and the outdated collection
+hint; the placement, enabled states and text above replace that behavior and need
+a new desktop check. Apply on a desktop, Blender 5.0 and 5.2, other platforms and
+live writes remain under
+[#66](https://github.com/scenario-labs/blender-plugin/issues/66). No live
+collection or tag write was made.
 
 ## Workflow reference selection
 

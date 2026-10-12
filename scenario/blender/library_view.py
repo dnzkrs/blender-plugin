@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Scenario Inc.
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Explicit asset browsing and confirmed model references over shared workers."""
+"""Explicit asset browsing, confirmed references and reviewed organization over shared workers."""
 
 import textwrap
 import uuid
@@ -11,7 +11,19 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, PointerProperty, StringProperty
 
 from ..core.api.library import asset_summary
+from ..core.jobs.organization import (
+    OrganizationBusy,
+    Outcome,
+    Phase,
+    ReviewUnavailable,
+    review_payload,
+)
+from ..core.ui import library_organization as organizing
 from . import generation, props, reference_form, runtime, workflow_references
+from .asset_organization import safe_message
+
+COLLECTION_PAGE = 50
+MAX_COLLECTIONS = 200
 
 
 def asset_kind(asset):
@@ -69,6 +81,27 @@ class LibraryView:
         self.next_cursor = None
         self.error = ""
         self.approvals = WeakSet()
+        # Explicitly loaded collection pages; names label rows and the Organize dialog.
+        self.collections = []
+        self.collections_loaded = False
+        self.collections_task = None
+        self.collections_pending = None
+        self.collections_next = None
+        self.collections_tokens = []
+        self.collections_error = ""
+        # One native review card, owned by the session's shared AssetOrganization.
+        self.review_id = None
+        self.review = None
+        self.review_label = ""
+        # The organized asset; its row draws the card when it is on the shown page.
+        self.review_asset_id = None
+        # The review whose read-back already updated rows; only the shown review syncs.
+        self.synced_review_id = None
+        self.stale = set()
+        # Read-back that arrived while a page or collection read was running. That
+        # read may list the state before the write, so its result takes it again once.
+        self.page_readback = None
+        self.collections_readback = None
 
     def current(self):
         return (
@@ -107,12 +140,19 @@ class LibraryView:
         self.task, self.error = task, ""
 
     def poll(self):
+        """Pump-only: consume finished reads and review progress; never sends a write."""
+        self._poll_page()
+        self._poll_collections()
+        self._sync_review()
+
+    def _poll_page(self):
         if self.task is None:
             return
         outcomes = self.session.drain(task=self.task)
         if not outcomes:
             return
         self.task = None
+        readback, self.page_readback = self.page_readback, None
         try:
             page = self.session.deliver_asset_library(outcomes[0])
             if not self.current():
@@ -129,6 +169,9 @@ class LibraryView:
             self.assets, self.filters = rows, filters
             self.cursors, self.index, self.next_cursor = cursors, index, next_cursor
             self.error = ""
+            self.stale.clear()
+            if readback is not None:
+                self._update_rows(*readback)
         except Exception:
             self.error = "Library could not load this page. Check the connection and refresh."
         finally:
@@ -234,6 +277,254 @@ class LibraryView:
             raise
         return ref
 
+    # Collections: explicit reads held as view state, never started by drawing.
+
+    def load_collections(self, direction="LOAD"):
+        if not self.current():
+            raise ValueError("The connection changed; refresh Library")
+        if self.collections_task is not None:
+            raise ValueError("Wait for the current collections request")
+        if direction == "LOAD":
+            token = None
+        elif direction == "MORE" and self.more_collections():
+            token = self.collections_next
+        else:
+            raise ValueError("No more collections can be loaded here")
+        task = self.session.asset_organization.collections(
+            page_size=COLLECTION_PAGE, pagination_token=token
+        )
+        self.collections_task, self.collections_pending = task, (direction, token)
+        self.collections_error = ""
+
+    def more_collections(self):
+        return self.collections_next is not None and len(self.collections) < MAX_COLLECTIONS
+
+    def _poll_collections(self):
+        task = self.collections_task
+        if task is None or not task.done():
+            return
+        self.collections_task = None
+        direction, token = self.collections_pending
+        self.collections_pending = None
+        readback, self.collections_readback = self.collections_readback, None
+        try:
+            page = self.session.asset_organization.take_collections(task)
+            if not self.current():
+                return
+            loaded = [] if direction == "LOAD" else list(self.collections)
+            tokens = [] if direction == "LOAD" else [*self.collections_tokens, token]
+            next_token = page["next_pagination_token"]
+            if next_token is not None and next_token in tokens:
+                raise ValueError("Scenario repeated a collection page; load collections again")
+            known = {row["collection_id"] for row in loaded}
+            for row in page["collections"]:
+                if row["collection_id"] not in known and len(loaded) < MAX_COLLECTIONS:
+                    known.add(row["collection_id"])
+                    loaded.append(row)
+            self.collections, self.collections_tokens = loaded, tokens
+            self.collections_next, self.collections_loaded = next_token, True
+            self.collections_error = ""
+            if readback is not None:
+                self._add_created(*readback)
+        except ValueError as error:
+            self.collections_error = str(error)
+        except Exception as error:
+            self.collections_error = safe_message(
+                error, "Collections could not load. Check the connection and try again."
+            )
+
+    def collection_names(self):
+        return {row["collection_id"]: row["name"] for row in self.collections if row["name"]}
+
+    def collection_choices(self):
+        """Enum items for the Organize dialog: loaded collections, then the browsed one."""
+        items = []
+        for row in self.collections:
+            count = row.get("asset_count")
+            label = organizing.clip(row["name"] or row["collection_id"], 40)
+            if count is not None:
+                label += f" ({count})"
+            items.append((row["collection_id"], label, ""))
+        browsed = self.filters[2] if self.filters is not None else ""
+        if browsed and all(item[0] != browsed for item in items):
+            items.append((browsed, organizing.clip("Browsed collection " + browsed, 48), ""))
+        return items
+
+    def browse_collection(self, view, scene, collection_id):
+        """Set the Collection ID filter to a loaded collection and read its first page."""
+        if not self.current():
+            raise ValueError("The connection changed; refresh Library")
+        if all(row["collection_id"] != collection_id for row in self.collections):
+            raise ValueError("Load collections and choose a listed one")
+        if self.task is not None:
+            raise ValueError("Wait for the current Library request")
+        view.query, view.public, view.collection = "", False, collection_id
+        self.start(scene, selection(view))
+
+    # Organization: one review card per view, prepared and applied through the
+    # session's shared AssetOrganization owner, the same reviews MCP uses.
+
+    def applying(self):
+        return self.review is not None and self.review.get("phase") == Phase.APPLYING.value
+
+    def agent_applying(self):
+        """Whether a ready card waits for another caller's change; read-only for drawing."""
+        return (
+            self.review is not None
+            and self.review.get("phase") == Phase.READY.value
+            and self.session.asset_organization.reviews.applying
+        )
+
+    def organize_block(self):
+        """Why Organize is unavailable for this page, or "" when it is offered."""
+        if not self.current():
+            return "The connection changed; refresh Library"
+        if self.filters is None:
+            return "Refresh Library before organizing an asset"
+        if self.filters[1]:
+            return "Public assets cannot be organized here; browse your own assets"
+        if self.task is not None:
+            return "Wait for the current Library request"
+        if self.applying():
+            return "Wait for the current organization change to finish"
+        return ""
+
+    def organizable(self, asset_id):
+        block = self.organize_block()
+        if block:
+            raise ValueError(block)
+        asset = next((row for row in self.assets if row["asset_id"] == asset_id), None)
+        if asset is None:
+            raise ValueError("Refresh Library and choose a listed asset")
+        return asset
+
+    def organize(self, asset_id, action, *, collection_id="", collection_name="", tags=""):
+        """Validate one dialog choice and queue its fresh read; nothing is written yet."""
+        asset = self.organizable(asset_id)
+        if not runtime.online():
+            raise ValueError("Allow Online Access in Blender's preferences first")
+        operation, arguments = organizing.request_arguments(
+            action,
+            asset_id,
+            collection_id=collection_id,
+            collection_name=collection_name,
+            tags=tags,
+            collections_loaded=self.collections_loaded,
+        )
+        owner = self.session.asset_organization
+        try:
+            review_id = owner.prepare(operation, **arguments)
+        except OrganizationBusy as error:
+            raise ValueError(organizing.REVIEWS_FULL) from error
+        previous = self.review_id
+        self.review_id, self.review = review_id, None
+        self.review_label = str(asset.get("name") or asset_id)
+        self.review_asset_id = asset_id
+        if previous is not None:
+            self._release(previous)
+        self._sync_review()
+        return review_id
+
+    def apply_review(self, review_id):
+        if not self.current():
+            raise ValueError("The connection changed; refresh Library")
+        self._sync_review()
+        if (
+            not review_id
+            or review_id != self.review_id
+            or self.review is None
+            or self.review.get("phase") != Phase.READY.value
+        ):
+            raise ValueError("Apply only the ready review shown in Library, once")
+        try:
+            self.session.asset_organization.apply(review_id)
+        except OrganizationBusy as error:
+            # This card is READY, so the change holding the single apply is an agent's.
+            raise ValueError(organizing.AGENT_APPLYING) from error
+        self._sync_review()
+
+    def dismiss_review(self, review_id):
+        if not review_id or review_id != self.review_id:
+            raise ValueError("This review is no longer shown")
+        self._sync_review()
+        if self.applying():
+            raise ValueError("A change that is being applied cannot be discarded")
+        self._release(review_id)
+        self.review_id = self.review = self.review_asset_id = None
+        self.review_label = ""
+
+    def review_row(self):
+        """The shown page's row for the card's asset, or None to draw the card on top."""
+        if self.review is None:
+            return None
+        return next((row for row in self.assets if row["asset_id"] == self.review_asset_id), None)
+
+    def _release(self, review_id):
+        try:
+            self.session.asset_organization.discard(review_id)
+        except ReviewUnavailable:
+            pass
+
+    def _sync_review(self):
+        """Refresh the card from the shared review and update rows from read-back records."""
+        if self.review_id is None or not self.session.active:
+            return
+        try:
+            status = self.session.asset_organization.review(self.review_id)
+        except ReviewUnavailable as error:
+            # An evicted settled card keeps its final outcome until dismissed.
+            self.review = organizing.unavailable_card(self.review, str(error))
+            return
+        self.review = review_payload(status)
+        if (
+            status.phase == Phase.FINISHED
+            and status.result is not None
+            and status.review_id != self.synced_review_id
+        ):
+            self.synced_review_id = status.review_id
+            readback = status.request, status.result
+            self._update_rows(*readback)
+            if self.task is not None:
+                self.page_readback = readback
+            if self.collections_task is not None:
+                self.collections_readback = readback
+
+    def _update_rows(self, request, result):
+        """Show what Scenario read back; rows leave a filtered page only on refresh."""
+        browsed = self.filters[2] if self.filters is not None else ""
+        for outcome in result.outcomes:
+            if outcome.tags is None:
+                continue
+            row = next((item for item in self.assets if item["asset_id"] == outcome.asset_id), None)
+            if row is None:
+                continue
+            row["tags"] = list(outcome.tags)
+            row["collection_ids"] = list(outcome.collection_ids or ())
+            if browsed and browsed not in row["collection_ids"]:
+                self.stale.add(outcome.asset_id)
+            else:
+                self.stale.discard(outcome.asset_id)
+        self._add_created(request, result)
+
+    def _add_created(self, request, result):
+        created = result.created_collection_id
+        if (
+            created
+            and result.create_outcome == Outcome.VERIFIED
+            and self.collections_loaded
+            and all(row["collection_id"] != created for row in self.collections)
+        ):
+            # MAX_COLLECTIONS bounds reads; a collection created here joins even at that bound.
+            self.collections.append(
+                {
+                    "collection_id": created,
+                    "name": request.collection_name,
+                    "asset_count": None,
+                    "model_count": None,
+                    "updated_at": None,
+                }
+            )
+
 
 def controls(*, create=False):
     if create:
@@ -338,6 +629,261 @@ class SCENARIO_OT_library_reference(bpy.types.Operator):
         return {"FINISHED"}
 
 
+_SAFE_FAILURE = "Organization is unavailable; refresh Library and try again"
+
+
+class SCENARIO_OT_library_collections(bpy.types.Operator):
+    bl_idname = "scenario.library_collections"
+    bl_label = "Load collections"
+    bl_description = "Read collections in the selected connection; this changes nothing"
+    direction: EnumProperty(items=[("LOAD", "Load", ""), ("MORE", "More", "")])
+
+    def execute(self, context):
+        try:
+            controls(create=True).load_collections(self.direction)
+        except ValueError as error:
+            self.report({"WARNING"}, str(error))
+            return {"CANCELLED"}
+        except Exception as error:
+            self.report({"WARNING"}, safe_message(error, _SAFE_FAILURE))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class SCENARIO_OT_library_collection_filter(bpy.types.Operator):
+    bl_idname = "scenario.library_collection_filter"
+    bl_label = "Browse collection"
+    bl_description = "Browse this collection's assets; clears Search and Public assets"
+    collection_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        try:
+            owner = controls()
+            if owner is None:
+                raise ValueError("Load collections first")
+            owner.browse_collection(
+                context.window_manager.scenario_library_view, context.scene, self.collection_id
+            )
+        except ValueError as error:
+            self.report({"WARNING"}, str(error))
+            return {"CANCELLED"}
+        except Exception:
+            self.report({"WARNING"}, "Enable online access and check the selected connection")
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+@dataclass
+class OrganizeMenu:
+    items: list
+    # Collections were loaded when the dialog opened, so an empty list means none exist.
+    loaded: bool = False
+
+
+_organize_menus = WeakValueDictionary()
+_NO_COLLECTIONS = [(organizing.NO_COLLECTION, organizing.collection_placeholder(False), "")]
+_NONE_YET = [(organizing.NO_COLLECTION, organizing.collection_placeholder(True), "")]
+
+
+def _collections(self, context):
+    # Blender passes OperatorProperties here, not the Python operator instance.
+    menu = _organize_menus.get(self.menu_id)
+    if menu is None:
+        return _NO_COLLECTIONS
+    if menu.items:
+        return menu.items
+    return _NONE_YET if menu.loaded else _NO_COLLECTIONS
+
+
+class SCENARIO_OT_library_organize(bpy.types.Operator):
+    bl_idname = "scenario.library_organize"
+    bl_label = "Organize asset"
+    bl_description = (
+        "Prepare a collection or tag change for this asset; review it before anything is sent"
+    )
+    asset_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    menu_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+    action: EnumProperty(name="Action", items=organizing.ACTIONS, options={"SKIP_SAVE"})
+    collection_id: EnumProperty(name="Collection", items=_collections, options={"SKIP_SAVE"})
+    collection_name: StringProperty(name="New collection name", options={"SKIP_SAVE"})
+    tags: StringProperty(
+        name="Tags", description="Comma-separated tags, kept exactly", options={"SKIP_SAVE"}
+    )
+
+    def invoke(self, context, event):
+        try:
+            owner = controls()
+            if owner is None:
+                raise ValueError("Refresh Library before organizing an asset")
+            asset = owner.organizable(self.asset_id)
+            self._owner = owner
+            self._asset_label = str(asset.get("name") or asset["asset_id"])
+            self._connection = organizing.connection_label(owner.session.scope.project_id)
+            self._menu = OrganizeMenu(owner.collection_choices(), owner.collections_loaded)
+            self.menu_id = uuid.uuid4().hex
+            _organize_menus[self.menu_id] = self._menu
+            if self._menu.items:
+                browsed = owner.filters[2]
+                ids = [item[0] for item in self._menu.items]
+                self.collection_id = browsed if browsed in ids else ids[0]
+        except ValueError as error:
+            self.report({"WARNING"}, str(error))
+            return {"CANCELLED"}
+        except Exception as error:
+            self.report({"WARNING"}, safe_message(error, _SAFE_FAILURE))
+            return {"CANCELLED"}
+        return context.window_manager.invoke_props_dialog(self, width=480)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Asset: " + organizing.clip(self._asset_label, 40))
+        layout.label(text=self._connection)
+        layout.prop(self, "action")
+        if self.action in {"ADD", "REMOVE"}:
+            layout.prop(self, "collection_id")
+        elif self.action == "CREATE":
+            layout.prop(self, "collection_name")
+        else:
+            layout.prop(self, "tags")
+        problem = organizing.dialog_problem(
+            self.action,
+            has_collections=bool(self._menu.items),
+            collections_loaded=self._menu.loaded,
+            collection_id=self.collection_id,
+            collection_name=self.collection_name,
+            tags=self.tags,
+        )
+        for index, line in enumerate(textwrap.wrap(problem, organizing.WIDTH)):
+            layout.label(text=line, icon="ERROR" if index == 0 else "BLANK1")
+        for index, line in enumerate(textwrap.wrap(organizing.NOTICE, organizing.WIDTH)):
+            layout.label(text=line, icon="INFO" if index == 0 else "BLANK1")
+        layout.label(text="OK reads the current state for review; nothing is sent yet")
+
+    def execute(self, context):
+        try:
+            owner = getattr(self, "_owner", None)
+            if owner is None or owner is not controls():
+                raise ValueError("Open Organize from a listed Library asset")
+            owner.organize(
+                self.asset_id,
+                self.action,
+                collection_id=self.collection_id,
+                collection_name=self.collection_name,
+                tags=self.tags,
+            )
+        except ValueError as error:
+            self.report({"WARNING"}, str(error))
+            return {"CANCELLED"}
+        except Exception as error:
+            self.report({"WARNING"}, safe_message(error, _SAFE_FAILURE))
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Review the change under the asset; nothing is sent until Apply")
+        return {"FINISHED"}
+
+
+class SCENARIO_OT_library_organization_apply(bpy.types.Operator):
+    bl_idname = "scenario.library_organization_apply"
+    bl_label = "Apply organization change"
+    bl_description = (
+        "Send the reviewed change once; it uses no credits and Blender Undo does not reverse it"
+    )
+    review_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        try:
+            owner = controls()
+            if owner is None:
+                raise ValueError("The connection changed; prepare the change again")
+            owner.apply_review(self.review_id)
+        except ValueError as error:
+            self.report({"WARNING"}, str(error))
+            return {"CANCELLED"}
+        except Exception as error:
+            self.report({"WARNING"}, safe_message(error, _SAFE_FAILURE))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+class SCENARIO_OT_library_organization_discard(bpy.types.Operator):
+    bl_idname = "scenario.library_organization_discard"
+    bl_label = "Discard organization review"
+    bl_description = "Close this review card; nothing is sent"
+    review_id: StringProperty(options={"HIDDEN", "SKIP_SAVE"})
+
+    def execute(self, context):
+        try:
+            owner = controls()
+            if owner is None:
+                raise ValueError("The connection changed; refresh Library")
+            owner.dismiss_review(self.review_id)
+        except ValueError as error:
+            self.report({"WARNING"}, str(error))
+            return {"CANCELLED"}
+        except Exception as error:
+            self.report({"WARNING"}, safe_message(error, _SAFE_FAILURE))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+
+def _draw_review(layout, owner):
+    review = owner.review
+    if review is None:
+        return
+    box = layout.box()
+    box.label(text="Organization review", icon="OUTLINER_COLLECTION")
+    if owner.review_label:
+        box.label(text="Asset: " + organizing.clip(owner.review_label, 40))
+    lines = organizing.review_lines(
+        review, names=owner.collection_names(), agent_applying=owner.agent_applying()
+    )
+    for text, icon in lines:
+        box.label(text=text, icon=icon)
+    actions = organizing.card_actions(review.get("phase"))
+    if not actions:
+        return
+    row = box.row(align=True)
+    if "APPLY" in actions:
+        apply = row.operator("scenario.library_organization_apply", text="Apply", icon="CHECKMARK")
+        apply.review_id = owner.review_id
+    label = "Discard" if "DISCARD" in actions else "Dismiss"
+    row.operator("scenario.library_organization_discard", text=label).review_id = owner.review_id
+
+
+def _draw_collections(layout, owner, view):
+    box = layout.box()
+    box.label(text="Collections", icon="OUTLINER_COLLECTION")
+    # A read never disables the control that started it: Blender 5.0 and 5.1 keep
+    # the hovered button's disabled look after the read ends, until the pointer
+    # leaves it. A second click is refused and the loading line shows progress.
+    row = box.row(align=True)
+    busy = owner is not None and owner.collections_task is not None
+    row.operator("scenario.library_collections", text="Load collections").direction = "LOAD"
+    more = row.row(align=True)
+    more.enabled = owner is not None and owner.more_collections()
+    more.operator("scenario.library_collections", text="More").direction = "MORE"
+    if owner is None:
+        return
+    if busy:
+        box.label(text="Loading collections…")
+    for line in textwrap.wrap(owner.collections_error, organizing.WIDTH):
+        box.label(text=line, icon="ERROR")
+    if owner.collections_loaded and not owner.collections:
+        box.label(text="No collections in this connection")
+    browsed = view.collection.strip()
+    for item in owner.collections:
+        count = item.get("asset_count")
+        text = organizing.clip(item["name"] or item["collection_id"], 32)
+        if count is not None:
+            text += f" ({count})"
+        line = box.row()
+        line.label(text=text, icon="CHECKMARK" if item["collection_id"] == browsed else "NONE")
+        line.operator("scenario.library_collection_filter", text="Browse").collection_id = item[
+            "collection_id"
+        ]
+    if owner.collections_next is not None and not owner.more_collections():
+        box.label(text=f"Showing the first {MAX_COLLECTIONS} collections")
+
+
 def draw(layout, context):
     view = context.window_manager.scenario_library_view
     box = layout.box()
@@ -347,11 +893,11 @@ def draw(layout, context):
     box.prop(view, "query")
     box.prop(view, "collection")
     owner = controls()
-    row = box.row()
-    row.enabled = owner is None or owner.task is None
-    row.operator("scenario.library_page", text="Refresh", icon="FILE_REFRESH").direction = "REFRESH"
+    # Page reads leave Refresh, Previous and Next enabled, as in the Collections box.
+    box.operator("scenario.library_page", text="Refresh", icon="FILE_REFRESH").direction = "REFRESH"
     if owner is None:
         box.label(text="Refresh to load assets in the selected connection")
+        _draw_collections(layout, None, view)
         return
     if owner.task is not None:
         box.label(text="Loading assets…")
@@ -364,25 +910,57 @@ def draw(layout, context):
         box.label(text="Filters changed; refresh to update these results")
     row = box.row(align=True)
     prev = row.row(align=True)
-    prev.enabled = not changed and owner.task is None and owner.index > 0
+    prev.enabled = not changed and owner.index > 0
     prev.operator("scenario.library_page", text="Previous").direction = "PREVIOUS"
     nex = row.row(align=True)
-    nex.enabled = not changed and owner.task is None and owner.next_cursor is not None
+    nex.enabled = not changed and owner.next_cursor is not None
     nex.operator("scenario.library_page", text="Next").direction = "NEXT"
     if owner.filters is not None and not owner.assets:
         box.label(text="No assets on this page")
+    if owner.filters is not None and owner.filters[1]:
+        box.label(text="Organize is unavailable for Public assets")
+    # The card opens under the row where Organize was chosen: the page above it
+    # keeps its place, so it appears next to the pointer instead of above the
+    # scrolled view. A page without that asset draws it here instead.
+    under = owner.review_row()
+    if under is not None:
+        box.label(text=organizing.review_pointer(owner.review_label), icon="TRIA_DOWN")
+    else:
+        _draw_review(layout, owner)
+    _draw_collections(layout, owner, view)
+    names = owner.collection_names()
+    organize = not owner.organize_block()
     for asset in owner.assets:
         item = layout.box()
         item.label(text=str(asset.get("name") or asset["asset_id"]))
         item.label(text=str(asset.get("mime_type") or "Unknown file type"))
-        row = item.row()
-        row.enabled = asset_kind(asset) is not None
-        row.operator("scenario.library_reference", text="Use as reference").asset_id = asset[
+        item.label(text=organizing.tags_summary(asset.get("tags") or ()))
+        item.label(text=organizing.membership_summary(asset.get("collection_ids") or (), names))
+        if asset["asset_id"] in owner.stale:
+            item.label(text="No longer in this collection; refresh", icon="FILE_REFRESH")
+        row = item.row(align=True)
+        reference = row.row(align=True)
+        reference.enabled = asset_kind(asset) is not None
+        reference.operator("scenario.library_reference", text="Use as reference").asset_id = asset[
             "asset_id"
         ]
+        change = row.row(align=True)
+        change.enabled = organize
+        change.operator("scenario.library_organize", text="Organize").asset_id = asset["asset_id"]
+        if asset is under:
+            _draw_review(layout, owner)
 
 
-CLASSES = (ScenarioLibraryView, SCENARIO_OT_library_page, SCENARIO_OT_library_reference)
+CLASSES = (
+    ScenarioLibraryView,
+    SCENARIO_OT_library_page,
+    SCENARIO_OT_library_reference,
+    SCENARIO_OT_library_collections,
+    SCENARIO_OT_library_collection_filter,
+    SCENARIO_OT_library_organize,
+    SCENARIO_OT_library_organization_apply,
+    SCENARIO_OT_library_organization_discard,
+)
 
 
 def register():
