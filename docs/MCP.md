@@ -518,6 +518,10 @@ client to inspect the operation before retrying. This does not cancel remote
 jobs or establish whether an HTTP client's independent timeout happened before
 or after dispatch.
 
+A call that omits an argument its input schema lists as required, or whose
+arguments are not an object, is refused before the tool runs with
+`ValueError: Missing required argument: <name>` (or the plural form); argument
+values are still checked by each tool.
 A failed tool call returns an `isError` result with one line, `Type: message`,
 and no traceback. The message is returned only when the extension wrote it: a
 validation error or refusal raised by the tool or by extension code it calls,
@@ -602,7 +606,10 @@ Some platform operations are discovered through its tool catalog.
 immediate asset ID or a local capture path. Both upload tools return while the
 shared session stages and transfers the prepared reference. Poll `reference_upload_status`
 until `state` is `imported`, then use `asset_id` in a fresh `estimate_cost` call.
-The generation still requires its own exact-cost approval. Do not repeat an
+The generation still requires its own exact-cost approval. An `upload_reference`
+file keeps uploading while the scene is edited, played or rendered; a
+`capture_reference` snapshot stops if the scene changes before it finishes. Undo,
+redo, removing the scene or loading a file stops either. Do not repeat an
 uncertain upload: inspect saved progress and explicitly refresh its known ID.
 After restart, use `list_reference_uploads`; session handles do not survive.
 Recovery can refresh, cancel unclaimed preparation, or clean a finished private
