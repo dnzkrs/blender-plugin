@@ -7,16 +7,20 @@
     "path": "docs/BLENDER_JOB_CONTEXT.md",
     "scope": "catalog-form-seeding",
     "coverage": "source-reviewed",
-    "reviewed_at": "2026-10-10",
-    "base_revision": "33d00b0554151c4de04731fd1a5e5c64ed50855b",
-    "limits": "Reviewed dependency-update origin invalidation against catalog form synchronization only. Catalog seeding and model-index restoration avoid RNA update callbacks, so a catalog load no longer makes origins, quotes or approvals captured before it stale; explicit selections and edits still invalidate them. Installed Blender 5.1.2 regressions cover a session origin across the first load and a restored model index, and an MCP approval across a seeding catalog load. Other origin, render-thread, deletion and history claims retain prior evidence. No desktop timing, other Blender series, live or release acceptance is established.",
+    "reviewed_at": "2026-10-12",
+    "base_revision": "72c5340cea11e688f1b62a35cf9c1e5f903193d3",
+    "limits": "Reviewed dependency-update origin invalidation against catalog form synchronization and automatically applied trained-model project defaults only. Catalog seeding and model-index restoration avoid RNA update callbacks, so a catalog load no longer makes origins, quotes or approvals captured before it stale; explicit selections and edits that assign a property with an RNA update callback still invalidate them. Re-reviewed on 2026-10-12 for the sentence on project defaults: trained_defaults.apply_pending, which the GUI pump, local MCP render inspection and quotes, Save and Clear call, applies a default to a form without an explicit choice through _apply with seed, which stores the model enum index and each LoRA strength (trained_models.write_slots) as raw ID properties, runs generation.on_model_changed itself and re-arms the form's price; Use (trained_defaults.use) still assigns through RNA; re-reviewed again on 2026-10-12: of what it writes, only a different base model and each LoRA strength with a declared range have an update callback (props: model_id and ScenarioTrainedSlot.scale), so a composition used on the form's current base writes only model_key, plain slot fields and the trained collection, leaving origins current while props.mark_estimate_dirty re-arms the form's price. The trained catalog events write only slot kinds, names and strength bounds, which have no update callback. JobSession._scene_changed, invalidate_scene and capture are unchanged by main's later job_session.py changes (preview, export and Film review ownership). Installed Blender 5.1.2 regressions cover a session origin across the first load and a restored model index, an MCP approval across a seeding catalog load, and origins captured in two scenes staying current while apply_pending applies a default there, with a Use assigning a different base invalidating one (test_trained_section.test_an_automatic_default_keeps_origins_captured_before_it, which failed before the raw writes), and, on the form's current base, a stack's Use invalidating through its strengths while a composition's Use leaves the origin current (test_use_on_the_current_base_stales_origins_only_through_strengths). Other origin, render-thread, deletion and history claims retain prior evidence. No desktop timing, other Blender series, live or release acceptance is established. Re-checked on 2026-10-12 after the replay onto the picker branch's repricing fix (c05d1fea): params_ui.sync_params now also calls props.mark_estimate_dirty when it drops a value of the form's own model. That writes only the estimate state, which has no update callback, so catalog synchronization still leaves captured origins current; only the params_ui.py fingerprint is refreshed.",
     "sources": {
-      "scenario/blender/job_session.py": "aa6b64633ca02992f355436eb3601147fa1a7457234c1e795f417a46a851b8eb",
+      "scenario/blender/job_session.py": "283300899c616cbb4a2ae9f81751e2ab189c1f5b10c8acaf51da07be56cb6c29",
       "scenario/core/jobs/origins.py": "d1282d67aacdfe2444a776cf1338667bea9ee67392ff3f473db581a0f8059977",
-      "scenario/blender/generation.py": "6fcde0ba8495a44d0c562971f3ddf8b31714bc19fec8fbe7b47145d8fb0035ab",
-      "scenario/blender/params_ui.py": "bda117a82c203865b9d8edb7129f0114e1a04db7a56d44eb557ea039148fca34",
+      "scenario/blender/generation.py": "d00e21459c5a0c9a8757e5ed53fc829c3a5d7002797d50e7d69b6d0db712d566",
+      "scenario/blender/params_ui.py": "c41d76277605de313226da7696b700617c67f2c63b013af552cc4fd1d0feb78b",
       "tests/blender/test_generation.py": "27b397a4c8487f84150cdcd065f407c0fd671e7a01a994c0af04338f82fbc5d4",
-      "tests/blender/test_model_generation.py": "1c1c89644d0d7881adbeaef4a73ed2e41b20c4434c2930414dc35d08cb8d74c2"
+      "tests/blender/test_model_generation.py": "8664c2f3cd296fc005a77d3d4009865df3e8b5bfdda3a6bbc9a2ed762bb32b68",
+      "scenario/blender/trained_defaults.py": "df72a33f70df469e124a16a65221a4a919e145ff24529cd3eaaa864a5e771ed8",
+      "scenario/blender/trained_models.py": "36f16dd75a5cf822bae5be7387c48aad1daa15ed837d2244255661a8f44545f7",
+      "tests/blender/test_trained_section.py": "c0e2338e7c172c836d67d97ef9f1beee471e77e4be9824e9659631c245ab6eeb",
+      "scenario/blender/props.py": "1d43b48ce3c6a268cc478077f107c9b3625efd61d14cd624f208cba58fc28051"
     }
   }
 }

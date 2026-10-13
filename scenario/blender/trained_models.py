@@ -7,8 +7,11 @@ catalog. Base-model descriptions, which declare the LoRA inputs, are read only
 when the picker shows its Trained chip, in lane order and once per connection.
 A lane keeps its choice as scope-tagged slots; every request rebuilds the LoRA
 inputs from the base's REST schema with trained_routes.apply, the same function
-local MCP and the quote check use.
+local MCP and the quote check use. trained_section draws the choice with its
+strengths, and trained_defaults keeps the explicit per-scope project defaults.
 """
+
+import math
 
 import bpy
 from bpy.props import IntProperty, StringProperty
@@ -27,6 +30,7 @@ LOADING = "Loading trained models"
 OTHER_SCOPE = "A trained model was chosen for another connection or project; choose it again"
 KIND_LABELS = {catalog.TRAINED_LORA: "LoRA", catalog.TRAINED_COMPOSITION: "Composition"}
 _hidden = {}  # model_id -> (record, names): LoRA inputs the form must not draw as text
+_slots = {}  # model_id -> (record, LoraSlot or None): the LoRA slot a base declares
 
 
 def trained_lane(lane):
@@ -64,7 +68,12 @@ def clear():
     state.trained_loaded = False
     state.trained_error = ""
     state.trained_scans = {}
+    state.trained_defaults = None
     _hidden.clear()
+    _slots.clear()
+    from . import trained_defaults
+
+    trained_defaults.forget()
 
 
 def request(manager, connection):
@@ -331,8 +340,16 @@ def _resolved(chosen, slot, *, visible_start=True):
     return resolved
 
 
-def _write(lane_state, lane, chosen, slot, scope):
-    """Replace the lane's slots with `chosen` (already resolved) for this base slot."""
+def write_slots(lane_state, lane, chosen, slot, scope, *, seed=False):
+    """Replace the lane's slots with `chosen` (already resolved) for this base slot.
+
+    A LoRA gets a strength control only when it has a strength and the slot
+    declares bounds; one without a strength sends the slot's declared default.
+    `seed` stores each strength within its bounds without the RNA update, for a
+    choice the user did not make in this scene (a project default applied
+    automatically): that update would tag the scene and make every origin
+    captured in it stale. The caller then re-arms the price.
+    """
     strength = trained_offers.strength(slot)
     lane_state.trained.clear()
     for model_id, kind, scale in chosen:
@@ -343,7 +360,10 @@ def _write(lane_state, lane, chosen, slot, scope):
         if scale is not None and strength is not None:
             item.fmin, item.fmax = strength.minimum, strength.maximum
             item.has_scale = True
-            item.scale = scale
+            if seed:
+                item["scale"] = strength.clamp(scale)
+            else:
+                item.scale = scale
         item[SCOPE] = scope
 
 
@@ -386,7 +406,7 @@ def choose(context, lane, offer, base_id, scale=None):
             lane_state.model_id = base.id  # its update callback runs on_model_changed
     else:
         generation.request_model(base.id)
-    _write(lane_state, lane, chosen, base.slot, scope)
+    write_slots(lane_state, lane, chosen, base.slot, scope)
     props.mark_estimate_dirty(lane_state)
     return lane
 
@@ -443,7 +463,7 @@ def restore(lane_state, lane, record, payload):
                 visible_start=False,
             )
             chosen = [(model_id, "", scale) for model_id, _kind, scale in resolved]
-    _write(lane_state, trained_lane(lane), chosen, slot, scope)
+    write_slots(lane_state, trained_lane(lane), chosen, slot, scope)
     return named - len(chosen)
 
 
@@ -491,28 +511,158 @@ def hidden_inputs(model_id):
     return names
 
 
-# -- drawing (read-only) ---------------------------------------------------------------
-def selection_text(slot):
-    name = slot.name or "Trained model"
-    if slot.kind == catalog.TRAINED_COMPOSITION:
-        return f"{name} (composition)"
-    if slot.has_scale:
-        return f"{name} (strength {round(slot.scale, trained_offers.STRENGTH_DIGITS):g})"
-    return name
+def base_slot(model_id):
+    """The LoRA slot a described base model declares, or None (read-only, cached per record)."""
+    record = runtime.state.records.get(model_id)
+    if record is None or not record.parameters:
+        return None
+    cached = _slots.get(model_id)
+    if cached is not None and cached[0] is record:
+        return cached[1]
+    try:
+        slot = LoraSlot.from_record(record.raw)
+    except ValueError:
+        slot = None
+    _slots[model_id] = (record, slot)
+    return slot
 
 
-def draw_selection(layout, lane_state, lane):
-    """The lane's trained choice under its Model button, each with a remove button."""
+def base_strength(model_id):
+    """The LoRA strength control a described base model declares, or None (read-only).
+
+    Its range is the base's; for where one LoRA's strength starts, use lora_strength.
+    """
+    slot = base_slot(model_id)
+    return trained_offers.strength(slot) if slot is not None else None
+
+
+def lora_strength(model_id, lora_id):
+    """One LoRA's strength control on a described base model, or None (read-only).
+
+    It starts where a newly chosen LoRA does in the picker: at the LoRA's own
+    declared strength, otherwise the Scenario web app's default, within the
+    base's declared range (trained_offers.strength).
+    """
+    slot = base_slot(model_id)
+    if slot is None:
+        return None
+    return trained_offers.strength(slot, runtime.state.trained_records.get(lora_id))
+
+
+def _same_range(slot, strength):
+    """Whether a slot holds this range already; its 32-bit bounds never read back 1.2 exactly."""
+    return math.isclose(slot.fmin, strength.minimum, rel_tol=1e-6, abs_tol=1e-9) and (
+        math.isclose(slot.fmax, strength.maximum, rel_tol=1e-6, abs_tol=1e-9)
+    )
+
+
+def sync_bounds(lane_state):
+    """Give each LoRA strength control the range its base declares now (main thread, not draw).
+
+    Called when the base's description is (re)loaded or the base changes. Every
+    strength control counts, including one Reload gave a LoRA before the trained
+    list named its kind (restore); a composition never has one. A strength
+    outside a narrowed range is kept, not changed silently: the request then
+    refuses it with the range until the user edits it. A changed range reprices
+    the form, so a background catalog refresh never leaves a price standing for
+    a strength the request now refuses.
+
+    A base that takes LoRAs but declares no range drops each control, as
+    write_slots gives none on that base: the LoRA then sends the base's declared
+    default, which the section shows, and the price is re-armed. A base not
+    described yet, or without LoRA inputs, changes nothing.
+    """
+    strength = base_strength(lane_state.model_id)
+    controls = [
+        slot
+        for slot in lane_state.trained
+        if slot.has_scale and slot.kind != catalog.TRAINED_COMPOSITION
+    ]
+    if strength is None:
+        if base_slot(lane_state.model_id) is None:
+            return
+        for slot in controls:
+            slot.has_scale = False  # a plain property: no update tags the scene
+        changed = bool(controls)
+    else:
+        changed = False
+        for slot in controls:
+            if not _same_range(slot, strength):
+                slot.fmin, slot.fmax = strength.minimum, strength.maximum
+                changed = True
+    if changed:
+        props.mark_estimate_dirty(lane_state)
+
+
+def set_strength(lane_state, index):
+    """Give a LoRA without a strength the start a newly chosen one gets (#97).
+
+    That is its own declared strength, otherwise the Scenario web app's default,
+    within the base's declared range (lora_strength).
+
+    An explicit action: a strength is never added to a request silently. Raises
+    ScenarioError when the base declares no strength range.
+    """
+    if not 0 <= index < len(lane_state.trained):
+        raise ScenarioError(0, "Choose a LoRA of this form")
+    slot = lane_state.trained[index]
+    if slot.kind != catalog.TRAINED_LORA:
+        raise ScenarioError(0, "Only a LoRA takes a strength; a composition applies its own")
+    strength = lora_strength(lane_state.model_id, slot.model_id)
+    if strength is None:
+        raise ScenarioError(0, "This base model declares no strength range for its LoRAs")
+    slot.fmin, slot.fmax = strength.minimum, strength.maximum
+    slot.has_scale = True
+    slot.scale = strength.initial  # its update callback invalidates the price
+    props.mark_estimate_dirty(lane_state)
+
+
+def selection_error(lane_state):
+    """Why the lane's trained choice cannot run now, or "" (read-only, safe in draw)."""
     if not len(lane_state.trained):
-        return
-    col = layout.column(align=True)
-    for index, slot in enumerate(lane_state.trained):
-        row = col.row(align=True)
-        icon = "GROUP" if slot.kind == catalog.TRAINED_COMPOSITION else "SHADERFX"
-        row.label(text=selection_text(slot), icon=icon)
-        op = row.operator("scenario.trained_remove", text="", icon="X")
-        op.lane, op.index = lane, index
-    col.label(text=EXPERIMENTAL, icon="EXPERIMENTAL")
+        return ""
+    record = runtime.state.records.get(lane_state.model_id)
+    if record is None or not record.parameters:
+        return ""  # the form already explains a model without its description
+    return apply_to(lane_state, record, {})[1]
+
+
+def slot_name(slot):
+    return slot.name or slot.model_id or "Trained model"
+
+
+def selection_label(lane_state, base_name):
+    """The label "Base · LoRA (+n)" for the lane's choice, or the base name alone."""
+    return trained_offers.selection_label(base_name, [slot_name(s) for s in lane_state.trained])
+
+
+def sent_strength(lane_state, slot):
+    """The strength a slot sends, as trained_routes.apply resolves it (read-only, safe in draw).
+
+    A LoRA sends its own strength (slot_scale), otherwise the declared default of
+    the lane's base. None for a composition, which applies its own strengths, and
+    for a LoRA that cannot send one: no declared default, a base not described
+    yet, or a model the trained list has not named.
+    """
+    scale = slot_scale(slot)
+    if scale is not None or slot.kind != catalog.TRAINED_LORA:
+        return scale
+    base = base_slot(lane_state.model_id)
+    default = base.scale_default if base is not None else None
+    return None if default is None else float(default)
+
+
+def selection_meta(lane_state):
+    """The chosen trained models for job views: IDs, names, kinds and the strength each sent."""
+    return [
+        {
+            "model_id": slot.model_id,
+            "name": slot_name(slot),
+            "kind": slot.kind,
+            "strength": sent_strength(lane_state, slot),
+        }
+        for slot in lane_state.trained
+    ]
 
 
 class SCENARIO_OT_trained_remove(bpy.types.Operator):

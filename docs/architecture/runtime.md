@@ -95,10 +95,23 @@ update callback, even with an unchanged value, and that update makes the scene's
 Seeding a new or replaced parameter with its schema default, correcting an enum
 value the schema no longer offers and restoring a model enum index therefore
 store raw values without callbacks. A seeded form re-arms its own price in its
-own scene, and a seeded model duration still drives the camera path. Removing an
-obsolete parameter alone does not re-arm a price. Explicit selections, mode or
-task changes and edits still use RNA and invalidate captured origins. Request
-bodies, models and render forms keep their own exact checks at approval.
+own scene, and a seeded model duration still drives the camera path. A refreshed
+base description that changes a form's LoRA strength range, or any other LoRA
+input its trained choice runs through, such as the declared default strength,
+re-arms that form's price the same way. A base's first description in a session,
+as after reopening a file, has no earlier inputs to compare: a price saved with
+the form stays unless its saved strength range differs. Removing an
+obsolete parameter alone does not re-arm a price. A trained-model project default
+applied automatically to a form without an explicit choice
+([project selection](#optional-project-selection)) follows the same rule: it
+stores the model enum index and LoRA strengths as raw values, runs the form's
+model synchronization itself and re-arms that form's price. Explicit selections
+and edits that assign a model, mode, task, parameter or LoRA strength still use
+RNA and invalidate captured origins. A default's **Use** always re-arms its
+form's price, and invalidates them only when it assigns a different base model
+or a LoRA strength; a composition used on the form's current base writes only
+the form's trained list. Request bodies, models and render forms keep their own
+exact checks at approval.
 
 Caches are connection-local and in memory. The active path does not reuse the
 prototype's unscoped disk model cache. Restart therefore requires a catalog
@@ -167,8 +180,19 @@ normalized-equivalent edits keep the current session. Explicit trained-model lan
 defaults follow the same selection: `ensure_model_defaults` opens an owner of the
 selected store's scope without any service request, and this retirement path
 retires it, so a default reviewed under the old selection cannot be written into
-the new one ([runtime owner](../JOB_STORAGE.md#runtime-owner)). Read-only history and Film
-controls check both credentials and project without mutating state in drawing.
+the new one ([runtime owner](../JOB_STORAGE.md#runtime-owner)). The native Image and
+Render Image forms read those defaults into a per-selection cache that drawing only
+reads; the GUI pump, before pricing, and local MCP render inspection, quotes or
+`configure` without a model give a form with no explicit choice its lane default
+once the route checks, without tagging the scene
+([catalog delivery](#active-sdk-catalog)), and block its price
+with the reason otherwise
+([trained models section](../UI_STYLE.md#trained-models-section-and-project-defaults)).
+A form that fails to take the default keeps waiting without keeping it from the
+other forms, and Save or Clear still succeeds once the store has written it; the
+pump reports the failure and retries that form, and local MCP logs it and returns
+the wait. Read-only history and Film controls check both credentials and project
+without mutating state in drawing.
 Prototype jobs have no reliable credential or project ownership. Their automatic
 service engine is retired for every selection, including the default project;
 clearing the override cannot resume it. See [local prototype records](#local-prototype-records).

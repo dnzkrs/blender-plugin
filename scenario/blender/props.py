@@ -252,8 +252,14 @@ def _param_items(self, context):
     return runtime.enum_items(key)
 
 
-def _find_lane_state(context, lane):
-    scene = getattr(context, "scene", None) or bpy.context.scene
+def _find_lane_state(context, lane, item=None):
+    """The lane state an edited form item belongs to: its own scene, else the context's.
+
+    A default applied to another scene's form must not reprice the visible one.
+    """
+    scene = getattr(item, "id_data", None)
+    if not isinstance(scene, bpy.types.Scene):
+        scene = getattr(context, "scene", None) or bpy.context.scene
     if scene is None or not lane:
         return None
     return scene.scenario.lane_state(lane)
@@ -275,7 +281,7 @@ def clamp_param(item, assign=setattr):
 
 def _on_param_update(self, context):
     clamp_param(self)
-    lane_state = _find_lane_state(context, self.lane)
+    lane_state = _find_lane_state(context, self.lane, self)
     if lane_state is not None:
         mark_estimate_dirty(lane_state)
     if self.name == "duration":
@@ -302,13 +308,42 @@ class ScenarioParamValue(bpy.types.PropertyGroup):
     has_range: BoolProperty(default=False)
 
 
+# The RNA default of every LoRA strength field (the form's and the picker's), which
+# Blender's Reset to Default Value (Backspace over the field) assigns. No base
+# declares it: each update replaces it with the LoRA's starting strength instead
+# of a 0.0 that would switch the LoRA off. A power of two, so 32-bit storage keeps
+# it exact.
+STRENGTH_RESET = -(2.0**100)
+
+
+def _reset_strength(lane_state, item):
+    """The strength a reset LoRA gets: the start a newly chosen one gets in the picker.
+
+    That is the LoRA's own declared strength, otherwise the Scenario web app's
+    default, within its base's declared range (trained_models.lora_strength).
+    Before the base is described, the update bounds it to the range the item kept.
+    """
+    from ..core.api import trained_offers
+    from . import trained_models
+
+    if lane_state is not None:
+        strength = trained_models.lora_strength(lane_state.model_id, item.model_id)
+        if strength is not None:
+            return strength.initial
+    return trained_offers.starting_strength(runtime.state.trained_records.get(item.model_id))
+
+
 def _on_trained_update(self, context):
     if self.has_scale:
+        if self.scale == STRENGTH_RESET:
+            # This assignment runs the callback once more, which bounds it and reprices.
+            self.scale = _reset_strength(_find_lane_state(context, self.lane, self), self)
+            return
         value = min(max(self.scale, self.fmin), self.fmax)
         if value != self.scale:
             self.scale = value  # this assignment runs the callback once more, within bounds
             return
-    lane_state = _find_lane_state(context, self.lane)
+    lane_state = _find_lane_state(context, self.lane, self)
     if lane_state is not None:
         mark_estimate_dirty(lane_state)
 
@@ -327,6 +362,7 @@ class ScenarioTrainedSlot(bpy.types.PropertyGroup):
     scale: FloatProperty(
         name="Strength",
         description="LoRA strength, within the range the base model declares",
+        default=STRENGTH_RESET,
         precision=2,
         step=5,
         update=_on_trained_update,

@@ -718,9 +718,19 @@ represented by Blender's string enum identifiers. Only declared numeric choices
 accept these strings; other numeric settings still require JSON numbers.
 Inspection also lists `trained_models`: the LoRAs or composition chosen for the
 Render Image form in the native picker's Trained chip, each with its kind and
-rounded strength. The render quote and generation include them, and a choice
-that cannot run blocks preparation with its reason. MCP cannot change this
-choice yet ([#97](https://github.com/scenario-labs/blender-plugin/issues/97)).
+the strength it sends: its own, rounded, or for a LoRA without one the base
+model's declared default; `null` for a composition, which applies its own
+strengths, and for a LoRA with no strength to send. The render quote and
+generation include them, and a choice
+that cannot run blocks preparation with its reason. A Render Image form whose
+model was never chosen takes the selected credentials and project's saved
+default when it is inspected, configured or quoted, as in the native form, or
+reports why it cannot. A `configure` without `model_id` edits the form once it
+holds that default; while the default is still applying or unavailable, it
+changes nothing and returns that reason. Naming `model_id` in `configure` is an
+explicit choice that the default no longer replaces. MCP cannot change the
+trained choice or the defaults yet
+([#97](https://github.com/scenario-labs/blender-plugin/issues/97)).
 
 Raw render-lane parameter calls now fail with preparation guidance. Use the
 ordinary Image/Video lanes for direct model parameters. Scene capture, file

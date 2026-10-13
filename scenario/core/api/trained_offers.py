@@ -30,6 +30,8 @@ __all__ = [
     "picks_from_payload",
     "runs",
     "saved_ids",
+    "selection_label",
+    "starting_strength",
     "strength",
 ]
 
@@ -70,9 +72,7 @@ def strength(slot, record=None):
     low, high = slot.scale_min, slot.scale_max
     if low is None or high is None or low > high:
         return None
-    declared = declared_strength(record) if record is not None else None
-    initial = DEFAULT_STRENGTH if declared is None else declared
-    initial = min(max(initial, low), high)
+    initial = min(max(starting_strength(record), low), high)
     return Strength(
         float(low), float(high), slot.scale_step, round(float(initial), STRENGTH_DIGITS)
     )
@@ -198,6 +198,22 @@ def merged(current, choice, *, same_base):
     return [*current, tuple(choice)]
 
 
+LABEL_SEPARATOR = " · "
+
+
+def selection_label(base_name, names):
+    """A base model and its trained choice in one short label: "Base · LoRA (+n)".
+
+    `names` lists the chosen LoRAs or the composition in form order; the first
+    one is named and the others are counted, so a compact chip stays compact.
+    """
+    names = [name for name in names if name]
+    if not names:
+        return base_name
+    extra = f" (+{len(names) - 1})" if len(names) > 1 else ""
+    return f"{base_name}{LABEL_SEPARATOR}{names[0]}{extra}"
+
+
 def concepts(record):
     """(model_id, scale) pairs a composition record lists, malformed entries skipped."""
     raw = record.raw if isinstance(record, catalog.ModelRecord) else record
@@ -215,6 +231,18 @@ def concepts(record):
                 )
             )
     return pairs
+
+
+def starting_strength(record=None):
+    """Where a LoRA's strength starts before any base range applies.
+
+    The strength the trained `record` declares for itself, otherwise
+    DEFAULT_STRENGTH, as the Scenario web app does. strength() clamps it to a
+    base's declared range; a reset strength field without that range is bounded
+    by the range it kept.
+    """
+    declared = declared_strength(record) if record is not None else None
+    return DEFAULT_STRENGTH if declared is None else declared
 
 
 def declared_strength(record):
