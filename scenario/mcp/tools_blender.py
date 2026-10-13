@@ -9,6 +9,7 @@ import tempfile
 
 import bpy
 
+from ..blender import file_state
 from . import sandbox
 from .protocol import ToolSpec
 
@@ -103,16 +104,28 @@ def execute_python(args):
     code = args.get("code") or ""
     if not code.strip():
         raise ValueError("code is required")
-    return sandbox.run_python(code)
+    if sandbox.blocked_token(code):
+        return sandbox.run_python(code)  # refused before running: nothing changed
+    try:
+        return sandbox.run_python(code)
+    finally:
+        # Like Blender's Run Script, which records Undo: the code may change anything.
+        file_state.mark_modified("Scenario MCP Python")
+
+
+def _selection():
+    layer = bpy.context.view_layer
+    return frozenset(obj for obj in layer.objects if obj.select_get()), layer.objects.active
 
 
 def select_objects(args):
     names = set(args.get("names") or [])
-    for obj in bpy.context.view_layer.objects:
-        obj.select_set(obj.name in names)
-    first = next((bpy.data.objects[n] for n in names if n in bpy.data.objects), None)
-    if first is not None:
-        bpy.context.view_layer.objects.active = first
+    with file_state.marking("Scenario MCP selection", _selection):
+        for obj in bpy.context.view_layer.objects:
+            obj.select_set(obj.name in names)
+        first = next((bpy.data.objects[n] for n in names if n in bpy.data.objects), None)
+        if first is not None:
+            bpy.context.view_layer.objects.active = first
     return {
         "selected": sorted(names & set(bpy.data.objects.keys())),
         "missing": sorted(names - set(bpy.data.objects.keys())),
@@ -121,7 +134,12 @@ def select_objects(args):
 
 def set_frame(args):
     scene = bpy.context.scene
-    scene.frame_set(int(args["frame"]))
+    frame = int(args["frame"])
+    # frame_set also resets the subframe.
+    with file_state.marking(
+        "Scenario MCP frame", lambda: (scene.frame_current, scene.frame_subframe)
+    ):
+        scene.frame_set(frame)
     return {"frame_current": scene.frame_current}
 
 
@@ -176,6 +194,7 @@ def camera_path(args):
     context = bpy.context
     scene = context.scene
     props = scene.scenario_shot
+    preset = None
     if args.get("preset"):
         resolve = getattr(shot_plan, "resolve_preset", None)
         preset = resolve(args["preset"]) if resolve else args["preset"]
@@ -185,36 +204,53 @@ def camera_path(args):
             and args["preset"] not in getattr(shot_plan, "PRESET_ALIASES", {})
         ):
             raise ValueError(f"preset must be one of {sorted(shot_plan.PRESETS)}")
-        props.preset = preset
-    if args.get("duration") is not None:
-        props.duration = float(args["duration"])
-    if args.get("focal") is not None:
-        props.focal = float(args["focal"])
-    if args.get("aim_at_subject") is not None:
-        props.aim_at_subject = bool(args["aim_at_subject"])
-    if args.get("description"):
-        plan = shot_plan.plan_from_text(args["description"])
-        props.preset, props.duration, props.focal = plan["preset"], plan["duration"], plan["focal"]
-    waypoints = args.get("waypoints") or []
-    if waypoints:
-        shot_planner.clear_markers(scene)
-        if hasattr(props, "closed_loop"):
-            props.closed_loop = bool(
-                args.get("closed_loop", False)
-            )  # explicit waypoints are an open path unless asked
-        for wp in waypoints:
-            position = wp.get("position")
-            if not position or len(position) != 3:
-                raise ValueError("each waypoint needs position: [x, y, z]")
-            rotation = wp.get("rotation_euler")
-            shot_planner.add_marker(
-                context,
+    # Read every argument before the first change, so a refused call leaves the file clean.
+    duration = float(args["duration"]) if args.get("duration") is not None else None
+    focal = float(args["focal"]) if args.get("focal") is not None else None
+    plan = shot_plan.plan_from_text(args["description"]) if args.get("description") else None
+    markers = []
+    for wp in args.get("waypoints") or []:
+        position = wp.get("position")
+        if not position or len(position) != 3:
+            raise ValueError("each waypoint needs position: [x, y, z]")
+        rotation = wp.get("rotation_euler")
+        markers.append(
+            (
                 tuple(float(v) for v in position),
-                rotation=tuple(rotation) if rotation else None,
-                focal=wp.get("focal"),
-                hold=float(wp.get("hold") or 0.0),
+                tuple(float(v) for v in rotation) if rotation else None,
+                float(wp["focal"]) if wp.get("focal") else None,
+                float(wp.get("hold") or 0.0),
             )
-    camera, keyframes, last_frame = shot_planner.build_path(context)
+        )
+    try:
+        if preset is not None:
+            props.preset = preset
+        if duration is not None:
+            props.duration = duration
+        if focal is not None:
+            props.focal = focal
+        if args.get("aim_at_subject") is not None:
+            props.aim_at_subject = bool(args["aim_at_subject"])
+        if plan is not None:
+            props.preset, props.duration, props.focal = (
+                plan["preset"],
+                plan["duration"],
+                plan["focal"],
+            )
+        if markers:
+            shot_planner.clear_markers(scene)
+            if hasattr(props, "closed_loop"):
+                props.closed_loop = bool(
+                    args.get("closed_loop", False)
+                )  # explicit waypoints are an open path unless asked
+            for position, rotation, marker_focal, hold in markers:
+                shot_planner.add_marker(
+                    context, position, rotation=rotation, focal=marker_focal, hold=hold
+                )
+        camera, keyframes, last_frame = shot_planner.build_path(context)
+    finally:
+        # Every step above changes the scene: a failure part-way still marks it.
+        file_state.mark_modified("Scenario camera path")
     return {
         "camera": camera.name,
         "keyframes": keyframes,

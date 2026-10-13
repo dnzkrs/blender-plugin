@@ -44,6 +44,7 @@ from ..core.jobs.results import (
 )
 from ..core.jobs.store import JobOrigin, JobState, StoredJob
 from ..core.jobs.workers import ExportTask, JobWorkers, LocalExportWorker
+from . import file_state, mesh_result_application, model_application
 from .film_application import FilmShotCommands
 from .image_application import ImageApplicationError, apply_images
 from .material_application import (
@@ -69,6 +70,22 @@ from .splat_application import import_splat
 from .world_application import PanoramaError, WorldApplication, WorldApplicationError, apply_world
 
 _log = logging.getLogger("scenario.jobs")
+
+
+def _changed(message, *, recorded=False):
+    """Mark the file modified once an application changed scene data, or may have.
+
+    Results arrive from the maintenance pump or a local MCP call, outside any
+    operator that records Undo. A refusal whose rollback was verified marks
+    nothing; an uncertain outcome, which may leave data behind, is marked.
+    Saved models and mesh edits record their own desktop Undo checkpoints when
+    Blender allows it (``recorded``); a second step would make the next Undo
+    appear to do nothing.
+    """
+    if not recorded:
+        file_state.mark_modified(message)
+
+
 _sessions = set()
 _sessions_lock = threading.Lock()
 _registered = False
@@ -1381,6 +1398,7 @@ class JobSession:
             images = apply_images(verified)
         except ImageApplicationError:
             if set(bpy.data.images) != before:
+                _changed("Scenario image import")
                 raise ImageResultUncertain() from None
             try:
                 self._coordinator.fail_application(claim)
@@ -1388,7 +1406,10 @@ class JobSession:
                 raise ImageResultUncertain() from None
             raise
         except Exception:
+            if set(bpy.data.images) != before:
+                _changed("Scenario image import")
             raise ImageResultUncertain() from None
+        _changed("Scenario image import")
         try:
             record = self._coordinator.complete_application(claim)
         except Exception:
@@ -1441,7 +1462,9 @@ class JobSession:
                 raise MediaResultUncertain() from None
             raise
         except Exception:
+            _changed("Scenario media import")
             raise MediaResultUncertain() from None
+        _changed("Scenario media import")
         try:
             record = self._coordinator.complete_application(claim)
         except Exception:
@@ -1546,7 +1569,10 @@ class JobSession:
                 raise ModelResultUncertain() from None
             raise
         except Exception:
+            # Its checkpoint before importing already marked the file.
+            _changed("Scenario model import", recorded=model_application._undo_enabled())
             raise ModelResultUncertain() from None
+        _changed("Scenario model import", recorded=model_application._undo_enabled())
         try:
             record = self._coordinator.complete_application(claim)
         except Exception:
@@ -1607,7 +1633,10 @@ class JobSession:
                 raise ModelResultUncertain() from None
             raise
         except Exception:
+            # Its checkpoint before replacing already marked the file.
+            _changed("Scenario mesh edit", recorded=mesh_result_application._undo_enabled())
             raise ModelResultUncertain() from None
+        _changed("Scenario mesh edit", recorded=application.undo_available)
         try:
             record = self._coordinator.complete_application(claim)
         except Exception:
@@ -1658,7 +1687,9 @@ class JobSession:
                 raise MaterialResultUncertain() from None
             raise
         except Exception:
+            _changed("Scenario material")
             raise MaterialResultUncertain() from None
+        _changed("Scenario material")
         try:
             record = self._coordinator.complete_application(claim)
         except Exception:
@@ -1726,21 +1757,25 @@ class JobSession:
             if destination is None
             else self._claim_saved_application(verified, destination, "world", (asset_id,))
         )
-        try:
-            application = apply_world(
-                scene, path, expected_receipt=item.receipt, media_type=item.asset.media_type
-            )
-        except (WorldApplicationError, PanoramaError):
+
+        def unchanged():
             try:
-                restored = (
+                return (
                     scene in tuple(bpy.data.scenes)
                     and scene.world == previous
                     and set(bpy.data.worlds) == worlds
                     and set(bpy.data.images) == images
                 )
             except Exception:
-                restored = False
-            if not restored:
+                return False
+
+        try:
+            application = apply_world(
+                scene, path, expected_receipt=item.receipt, media_type=item.asset.media_type
+            )
+        except (WorldApplicationError, PanoramaError):
+            if not unchanged():
+                _changed("Scenario World")
                 raise WorldResultUncertain() from None
             try:
                 self._coordinator.fail_application(claim)
@@ -1748,7 +1783,10 @@ class JobSession:
                 raise WorldResultUncertain() from None
             raise
         except Exception:
+            if not unchanged():
+                _changed("Scenario World")
             raise WorldResultUncertain() from None
+        _changed("Scenario World")
         try:
             record = self._coordinator.complete_application(claim)
         except Exception:

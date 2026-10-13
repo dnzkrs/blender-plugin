@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Native workflow forms over the shared session, quotes and durable jobs."""
 
+import functools
 import json
 import textwrap
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ from ..core.api.errors import ScenarioError
 from ..core.schema.forms import display_label, schema_defaults, validate_parameters
 from ..core.schema.params import parse_schema
 from ..core.ui.costs import workflow_loop_warning
-from . import reference_form, runtime, workflow_steps
+from . import file_state, reference_form, runtime, workflow_steps
 
 # Persisted ID properties on workflow file inputs. A marker blocks pricing until
 # its upload attaches or is explicitly resolved; the request records provenance.
@@ -210,6 +211,16 @@ def signature(form):
     return _json(value)
 
 
+def _loaded(form):
+    """Everything load_form writes, for the file-modified mark.
+
+    signature() is the approval identity: its stored schema carries the inputs'
+    labels and descriptions, but not the displayed title, which a reload of a
+    renamed workflow changes alone.
+    """
+    return signature(form), form.title
+
+
 @dataclass
 class WorkflowView:
     scene: object
@@ -302,7 +313,12 @@ class WorkflowControls:
                             raise ValueError("Inputs changed")
                         if view.ticket is not None and not view.ticket.used:
                             self.jobs.discard_workflow_quote(view.ticket.identifier)
-                        load_form(view.scene.scenario_workflow, result)
+                        form = view.scene.scenario_workflow
+                        # Delivered by maintenance, after the load operator has returned. A
+                        # refused schema changes nothing; a failure part-way still marks.
+                        read = functools.partial(_loaded, form)
+                        with file_state.marking("Scenario workflow form", read):
+                            load_form(form, result)
                         view.cost = view.cost_warning = ""
                     else:
                         result = self.jobs.session.deliver_workflow_catalog(outcomes[0])

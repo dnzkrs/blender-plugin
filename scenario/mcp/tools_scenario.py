@@ -10,7 +10,7 @@ from pathlib import Path
 
 import bpy
 
-from ..blender import generation, runtime, trained_defaults, trained_models
+from ..blender import file_state, generation, runtime, trained_defaults, trained_models
 from ..blender import result_previews as preview_tiles
 from ..blender.props import GENERATION_LANES as NATIVE_LANES
 from ..core import audio_waveform
@@ -895,16 +895,18 @@ def film_recipe(args):
             **inspection,
             "warnings": recipe_warnings(raw),
         }
-    if action == "load":
-        raw = args["recipe"]
-        plan = film_jobs.load_recipe(scene, raw)
-    elif action == "new_production":
-        import uuid
+    # Validation refuses before any change; a reload of the same recipe changes nothing.
+    with file_state.marking("Scenario Film recipe", lambda: _film_fields(scene)):
+        if action == "load":
+            raw = args["recipe"]
+            plan = film_jobs.load_recipe(scene, raw)
+        elif action == "new_production":
+            import uuid
 
-        raw, plan = film_jobs.recipe(scene)
-        scene.scenario_film.production_id = uuid.uuid4().hex
-    else:
-        raise ValueError("Choose inspect, load or new_production")
+            raw, plan = film_jobs.recipe(scene)
+            scene.scenario_film.production_id = uuid.uuid4().hex
+        else:
+            raise ValueError("Choose inspect, load or new_production")
     return {
         "production_id": scene.scenario_film.production_id,
         "title": plan["title"],
@@ -912,6 +914,33 @@ def film_recipe(args):
         "shots": [{"shot_id": shot["id"], "title": shot["title"]} for shot in plan["shots"]],
         "warnings": recipe_warnings(raw),
     }
+
+
+def _film_fields(scene):
+    """The recipe fields film_recipe can change, for its file-modified mark."""
+    film = scene.scenario_film
+    return (
+        film.recipe_json,
+        film.production_id,
+        film.title,
+        film.shot_index,
+        film.task_index,
+        tuple((row.name, row.title) for row in film.shots),
+        tuple((row.name, row.title, row.kind, row.model_id) for row in film.tasks),
+    )
+
+
+def _built(build, message):
+    """Run one Film build and mark the file modified when it added or left data.
+
+    The native build operators declare Undo; agents' builds are marked here. A
+    refused or rolled-back build, or an uncertain one that built nothing, leaves
+    the file unmarked.
+    """
+    from ..blender import film_scene
+
+    with file_state.marking(message, film_scene._snapshot):
+        return build()
 
 
 def _film_owner(args):
@@ -1014,7 +1043,8 @@ def film_shot_review(args):
 
 
 def build_film_shot(args):
-    return runtime.ensure_film_jobs().session.film_shots.approve(args["review_id"])
+    commands = runtime.ensure_film_jobs().session.film_shots
+    return _built(lambda: commands.approve(args["review_id"]), "Scenario Film shot")
 
 
 def film_timeline_sources(args):
@@ -1043,7 +1073,8 @@ def film_timeline_review(args):
 
 
 def build_film_timeline(args):
-    return runtime.ensure_film_jobs().session.film_timeline.approve(args["review_id"])
+    commands = runtime.ensure_film_jobs().session.film_timeline
+    return _built(lambda: commands.approve(args["review_id"]), "Scenario Film timeline")
 
 
 def prepare_film_composition(args):
@@ -1127,7 +1158,8 @@ def film_review_status(args):
 
 
 def build_film_review(args):
-    return runtime.ensure_film_jobs().session.film_review.approve(args["review_id"])
+    commands = runtime.ensure_film_jobs().session.film_review
+    return _built(lambda: commands.approve(args["review_id"]), "Scenario Film review")
 
 
 def _output_folder():
@@ -1389,7 +1421,10 @@ def blockout_plan_status(args):
 
 
 def apply_blockout_plan(args):
-    return runtime.blockout_recovery(args["context_id"]).apply(args["review_id"])
+    result = runtime.blockout_recovery(args["context_id"]).apply(args["review_id"])
+    # The native Use saved plan operator declares Undo; an agent's approval is marked here.
+    file_state.mark_modified("Scenario Blockout plan")
+    return result
 
 
 def read_model_text(args):
