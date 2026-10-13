@@ -1001,6 +1001,62 @@ submissions are unbound. Bindings and readings retire with their owner on a
 credential, project or file change. Lanes are not persisted: restarted and
 recovered jobs are unbound, and MCP reports `lane: null` for them.
 
+### Failure reasons
+
+When a retrieval reports `status: failure`, the coordinator commits the saved
+`failed` state from it, and the same `ModelJobs._observe` hook reads the reason
+Scenario gave. SDK 2.2.0 and the [job retrieval reference](https://docs.scenario.com/api/python/resources/jobs/methods/retrieve)
+document two optional strings in `Job.metadata`: `error` ("Eventual error for
+the job") and `hint` ("Actionable hint for the user explaining what went wrong
+and how to resolve it"). [`failures.observe`](../scenario/core/jobs/failures.py)
+joins them into one `RemoteFailure` bound to the record's remote job ID and
+saved revision. The text is untrusted, so nothing is rewritten or redacted: an
+allowlist gate, made only of plain string operations, shows each part as it is
+when it is plain text and otherwise replaces it with a fixed sentence. After at
+most 4,096 characters are read and control, format and space characters become
+single spaces, a part is shown only when:
+
+- every character is a letter, a digit, a space or one of
+  `. , ; : ' " ( ) - ! ? / % _`, and the part contains no `//`;
+- every space-separated token, without surrounding punctuation, is an exact
+  support id, a Scenario resource ID, a word of letters (with hyphens or
+  apostrophes inside) shorter than 32 characters, or another token shorter than
+  12 characters that switches between letters and digits at most twice, so
+  `4096x4096`, `720p` and `H3` pass and short random strings do not;
+- a `/` only joins two tokens shorter than 12 characters that each pass these
+  same rules, as in `width/height` or `in/out`;
+- no token contains a credential word (`key`, `secret`, `token`, `password`,
+  `passwd`, `pwd`, `auth`, `credential`, `signature`, `session`, `cookie`, or
+  `sig` alone), also with its separators removed (`tok/en`, `tok_en`,
+  `pass/word`) or digits standing for letters (`tok3n`, `s3ss10n`), except
+  harmless words such as `keyframe`, `key-frame`, `keyword` or `author`.
+
+A Scenario resource ID is `model_`, `job_`, `asset_`, `team_`, `proj_`, `col_`,
+`workflow_`, `upload_` or `apiu_` followed by 20 to 24 letters and digits, as
+recorded fixtures show, or a public model's lowercase hyphenated slug of 2 to 9
+words. A support error id is lowercase `error_` followed by 6 to 64 letters and
+digits with a capital or digit.
+
+A part that is not plain text reads "Scenario reported more details that are
+not shown here.", and nothing is taken from it, not even a support id. When
+neither part is plain text, the reason is "Scenario reported a failure without
+a readable reason." When both are shown and one contains the other, ignoring
+case, spacing and final punctuation, only the longer is kept. The joined text
+is cut to 400 characters at a word boundary with an ellipsis, never inside a
+support id; when the cut drops the first support id of the shown text, it is
+appended. Missing, blank and non-text values give no part, and other statuses
+give no reason; a failed reading drops it and logs only its error type.
+
+Each maintenance poll sets a `failed` view's error to that reason while the
+record keeps the reading's remote ID and revision, else to none: nothing else
+remains to deliver for a failed job. Generations, the composer's job strip and
+job card, **Generation details** and MCP `job_status` all read this view error.
+Like progress, the reason stays in memory: the job database stores no message,
+so a job that failed before a restart shows `failed` without a reason, and
+`list_local_jobs` has no error field. A server-side failure cannot be produced
+on demand, so installed tests send these documented fields through the
+synthetic SDK transport.
+
 ## Waiting workflow steps
 
 `ModelJobs._observe` also projects the waiting approval and selection steps of a
