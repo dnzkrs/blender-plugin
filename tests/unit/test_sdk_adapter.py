@@ -14,6 +14,7 @@ import pytest
 
 from scenario import __version__
 from scenario.core.api.sdk_adapter import (
+    ESTIMATE_STARTED_JOB,
     LOOP_NODE_FIELDS,
     MODEL_BULK_LIMIT,
     NON_LOOP_NODE_TYPES,
@@ -21,6 +22,7 @@ from scenario.core.api.sdk_adapter import (
     AdapterStatusError,
     AdapterUnavailable,
     Credentials,
+    EstimateStartedJob,
     SDKAdapter,
     model_identifiers,
     workflow_loop_steps,
@@ -384,6 +386,46 @@ def test_estimate_requires_a_valid_server_cost(adapter, cost):
         adapter(
             lambda r: httpx.Response(200, content=json.dumps({"creativeUnitsCost": cost}).encode())
         ).estimate_model(MODEL, {"prompt": "test"})
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"creativeUnitsCost": 2, "job": {"jobId": "job_started", "status": "queued"}},
+        {"creativeUnitsCost": 2, "jobId": "job_started"},
+        {"job": {"jobId": "job_started"}},
+    ],
+)
+@pytest.mark.parametrize("operation", ["model", "prompt"])
+def test_an_estimate_that_carries_a_job_is_refused_and_names_it(adapter, body, operation):
+    # A dry run must never start work; if it ever does, no Estimate is issued.
+    ESTIMATE_STARTED_JOB.clear()
+    client = adapter(lambda r: httpx.Response(200, json=body))
+    with pytest.raises(EstimateStartedJob) as caught:
+        if operation == "model":
+            client.estimate_model(MODEL, {"prompt": "test"})
+        else:
+            client.estimate_prompt({"mode": "completion", "prompt": "test"})
+    assert caught.value.job_id == "job_started"
+    # Recorded where it is detected, so any caller can stop automatic pricing.
+    assert ESTIMATE_STARTED_JOB.is_set()
+    ESTIMATE_STARTED_JOB.clear()
+    for clone in (copy.copy(caught.value), pickle.loads(pickle.dumps(caught.value))):
+        assert type(clone) is EstimateStartedJob
+        assert clone.job_id == "job_started"
+        assert str(clone) == str(caught.value)
+
+
+@pytest.mark.parametrize("job", [{}, {"jobId": ""}, {"jobId": "bad id\n"}, "job_started", None])
+def test_an_estimate_with_an_unreadable_job_is_still_refused(adapter, job):
+    client = adapter(lambda r: httpx.Response(200, json={"creativeUnitsCost": 2, "job": job}))
+    try:
+        with pytest.raises(EstimateStartedJob) as caught:
+            client.estimate_model(MODEL, {"prompt": "test"})
+        assert caught.value.job_id is None
+        assert ESTIMATE_STARTED_JOB.is_set()
+    finally:
+        ESTIMATE_STARTED_JOB.clear()
 
 
 def test_zero_cost_is_valid(adapter):
