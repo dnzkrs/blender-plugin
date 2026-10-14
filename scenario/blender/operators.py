@@ -438,29 +438,39 @@ class SCENARIO_OT_error_details(bpy.types.Operator):
     bl_description = "Show the full error message"
     local_id: StringProperty()
 
+    @staticmethod
+    def _message(rec):
+        # A native review note, when the state has one, replaces the shared error.
+        return (rec.meta.get("review_note") or rec.error) if rec else None
+
     @classmethod
     def description(cls, context, properties):
         rec = next((r for r in runtime.state.jobs_view if r.local_id == properties.local_id), None)
-        return (
-            rec.error if rec and rec.error else "Show the full error message"
-        )  # hover shows the whole message
+        return cls._message(rec) or "Show the full error message"  # hover shows the whole message
+
+    def _rec(self):
+        return next((r for r in runtime.state.jobs_view if r.local_id == self.local_id), None)
+
+    def _text(self):
+        return self._message(self._rec()) or "No error message was returned"
 
     def invoke(self, context, event):
+        # A state that did not fail names itself, such as an unconfirmed submission.
+        rec = self._rec()
+        title = (rec.meta.get("error_title") if rec else None) or "Generation failed"
         return context.window_manager.invoke_props_dialog(
-            self, width=460, title="Generation failed", confirm_text="Close"
+            self, width=460, title=title, confirm_text="Copy error"
         )
 
     def draw(self, context):
-        rec = next((r for r in runtime.state.jobs_view if r.local_id == self.local_id), None)
-        layout = self.layout
-        text = (rec.error if rec and rec.error else "") or "No error message was returned"
-        col = layout.column(align=True)
+        text = self._text()
+        col = self.layout.column(align=True)
         for line in textwrap.wrap(text, 66) or [text]:
             col.label(text=line)
-        op = layout.operator("scenario.copy_text", text="Copy error", icon="COPYDOWN")
-        op.text, op.what = text, "error message"
 
     def execute(self, context):
+        context.window_manager.clipboard = self._text()
+        self.report({"INFO"}, "Copied error message")
         return {"FINISHED"}
 
 
