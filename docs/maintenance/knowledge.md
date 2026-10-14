@@ -80,18 +80,24 @@ also lists the files the branch changes since its merge base and the documents
 whose sources those files are.
 
 Drift is a warning, one per document: the sources Git reports as changed since
-`reviewed_revision`, including committed, staged, unstaged and removed files. It
-asks for a review; it is not proof that the document is wrong.
+`reviewed_revision`, including committed, staged, unstaged and removed files.
+Canonical documents and records listed as sources never count, since the release
+refresh edits them after its reviewed commit. The JSON report lists changed
+paths in `sources` and deleted ones also in `removed`. Drift asks for a review;
+it is not proof that the document is wrong.
 
 ## Release refresh
 
 Once a version's scope is settled, one agent or maintainer refreshes the drifted
 documents on a branch from current main and opens a single PR. Only one refresh
-runs at a time, so it does not conflict with itself.
+runs at a time, so it does not conflict with itself. Agents run it with
+`/knowledge-refresh` (Codex: `$blender-knowledge-refresh`).
 
 1. Run the checker with `--base origin/main --json` and take its `drift` list.
 2. For each drifted document, read `git diff <reviewed_revision>..origin/main --`
-   on its drifted sources. Correct the prose that the changes made wrong.
+   on its drifted sources. Correct the prose that the changes made wrong by
+   replacing or deleting it. Add no dates, test runs or review remarks. A
+   refreshed document should not grow unless new behavior needs the lines.
 3. Update that record: prune or add sources, set `reviewed_revision` to the main
    commit you reviewed and `reviewed_at` to today's UTC date, and rewrite
    `limits` as current boundaries. Narrow `coverage` only after reviewing the
