@@ -2761,7 +2761,9 @@ class ModelGenerationTests(unittest.TestCase):
                 self.assertEqual(status["status"], "ready", status)
                 self.assertIsNone(status["error"])
                 self.assertEqual(status["images"], [])
-                self.assertEqual(status["files"], [])
+                # Every verified saved result is listed, whatever its media type.
+                self.assertEqual(status["results"][0]["file_state"], "verified")
+                self.assertEqual(status["files"], [status["results"][0]["file"]])
                 with self.assertRaisesRegex(ValueError, "prepare_result_application"):
                     self.tools.import_result({"job_id": reference})
                 self.assertEqual(status["results"][0]["media_type"], media_type)
