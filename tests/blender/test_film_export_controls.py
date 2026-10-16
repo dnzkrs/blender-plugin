@@ -840,8 +840,12 @@ class FilmExportVerifierTests(unittest.TestCase):
         tool = folder / "ffprobe"
         tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         tool.chmod(0o755)
-        # Blender opened from the macOS Dock or Finder gets launchd's PATH.
-        self.enterContext(patch.dict(os.environ, {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}))
+        # Blender opened from the macOS Dock or Finder gets launchd's PATH, rebased
+        # into empty folders so tools installed on this machine stay hidden.
+        dock = [folder / "dock" / part for part in ("usr/bin", "bin", "usr/sbin", "sbin")]
+        for part in dock:
+            part.mkdir(parents=True)
+        self.enterContext(patch.dict(os.environ, {"PATH": os.pathsep.join(map(str, dock))}))
         self.enterContext(patch.object(lookup, "_platform", return_value="darwin"))
         self.enterContext(patch.object(lookup, "DIRECTORIES", {"darwin": (str(folder),)}))
         self.assertEqual(lookup.find("ffprobe"), tool)

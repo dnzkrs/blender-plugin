@@ -17,7 +17,8 @@ import pytest
 from scenario.core.jobs import installed_tools as tools
 from scenario.core.jobs import local_render, media_probe
 
-DOCK_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# launchd's PATH for apps opened from the Dock or Finder, rebased into empty folders.
+DOCK_FOLDERS = ("usr/bin", "bin", "usr/sbin", "sbin")
 posix = pytest.mark.skipif(os.name == "nt", reason="Fake tools use POSIX permission bits")
 
 
@@ -49,6 +50,15 @@ def folders(tmp_path, monkeypatch):
     return path, brew, ports
 
 
+@pytest.fixture
+def dock_path(tmp_path, monkeypatch):
+    """A Dock-like PATH of empty folders, so tools installed on this machine stay hidden."""
+    folders = [tmp_path / "dock" / folder for folder in DOCK_FOLDERS]
+    for folder in folders:
+        folder.mkdir(parents=True)
+    monkeypatch.setenv("PATH", os.pathsep.join(map(str, folders)))
+
+
 @posix
 def test_found_on_path_first(folders):
     path, brew, _ = folders
@@ -58,9 +68,8 @@ def test_found_on_path_first(folders):
 
 
 @posix
-def test_found_only_in_a_standard_folder_with_a_dock_path(folders, monkeypatch):
+def test_found_only_in_a_standard_folder_with_a_dock_path(folders, dock_path):
     _, brew, ports = folders
-    monkeypatch.setenv("PATH", DOCK_PATH)
     tool(ports)
     expected = tool(brew)
     before = dict(os.environ)
@@ -100,9 +109,14 @@ def test_working_directory_and_relative_path_entries_are_never_searched(
 
 
 @posix
-def test_unset_path_still_checks_standard_folders(folders, monkeypatch):
+def test_unset_path_still_checks_standard_folders(folders, tmp_path, monkeypatch):
     _, brew, _ = folders
     monkeypatch.delenv("PATH")
+    # Without PATH, shutil.which searches the system default PATH; keep it empty.
+    default = tmp_path / "default"
+    default.mkdir()
+    monkeypatch.setattr(os, "confstr", lambda name: str(default), raising=False)
+    monkeypatch.setattr(os, "defpath", str(default))
     expected = tool(brew)
     assert tools.find("ffprobe") == expected.resolve()
 
@@ -184,9 +198,8 @@ def test_missing_message_names_tools_folders_and_the_dock_hint(monkeypatch):
 
 
 @posix
-def test_film_media_inspection_finds_a_standard_folder_tool(folders, monkeypatch):
+def test_film_media_inspection_finds_a_standard_folder_tool(folders, dock_path):
     _, brew, _ = folders
-    monkeypatch.setenv("PATH", DOCK_PATH)
     with pytest.raises(media_probe.MediaProbeError) as missing:
         media_probe.probe_tool()
     assert str(missing.value).startswith("Install ffprobe before inspecting Film media:")
@@ -196,9 +209,8 @@ def test_film_media_inspection_finds_a_standard_folder_tool(folders, monkeypatch
 
 
 @posix
-def test_mp4_capture_names_only_the_missing_tool(folders, monkeypatch):
+def test_mp4_capture_names_only_the_missing_tool(folders, dock_path):
     _, brew, _ = folders
-    monkeypatch.setenv("PATH", DOCK_PATH)
     ffmpeg = tool(brew, "ffmpeg")
     with pytest.raises(local_render.LocalRenderError) as missing:
         local_render.media_tools()
